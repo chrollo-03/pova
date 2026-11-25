@@ -618,8 +618,8 @@ fn browse(f: &mut Frame, app: &mut App, area: Rect, library: bool) {
     )
     .column_spacing(1)
     .row_highlight_style(table_style(&t));
-    let mut view_state = ratatui::widgets::TableState::default()
-        .with_selected(lv.state.selected().and_then(|s| s.checked_sub(start)));
+    let mut view_state =
+        ratatui::widgets::TableState::default().with_selected(lv.state.selected().and_then(|s| s.checked_sub(start)));
     f.render_stateful_widget(table, table_area, &mut view_state);
     if has_sb {
         draw_scrollbar(

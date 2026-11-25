@@ -1518,11 +1518,7 @@ impl App {
                 self.flash(format!("Deleted the playlist {title}"), false);
             }
             YtmEvent::Accounts { items } => {
-                if let Some(Overlay::Accounts {
-                    items: slot,
-                    state,
-                }) = self.overlay.as_mut()
-                {
+                if let Some(Overlay::Accounts { items: slot, state }) = self.overlay.as_mut() {
                     let active_idx = items.iter().position(|a| a.active).unwrap_or(0);
                     *slot = Some(items);
                     state.select(slot.as_ref().filter(|v| !v.is_empty()).map(|_| active_idx));
@@ -1992,11 +1988,7 @@ impl App {
         if self.tab == Tab::Search && self.search.editing && self.on_edit_key(k) {
             return;
         }
-        if self.tab == Tab::Search
-            && !self.search.editing
-            && self.search.stack.is_empty()
-            && k.code == KeyCode::Enter
-        {
+        if self.tab == Tab::Search && !self.search.editing && self.search.stack.is_empty() && k.code == KeyCode::Enter {
             self.search.editing = true;
             self.search.cursor = self.search.input.chars().count();
             return;
@@ -3299,11 +3291,8 @@ impl App {
                     }
                 }
                 Hit::SwitchAccount => self.open_accounts(),
-                Hit::MenuItem(_)
-                | Hit::ThemeItem(_)
-                | Hit::AccountItem(_)
-                | Hit::PlaylistPick(_)
-                | Hit::Confirm(_) => {}
+                Hit::MenuItem(_) | Hit::ThemeItem(_) | Hit::AccountItem(_) | Hit::PlaylistPick(_) | Hit::Confirm(_) => {
+                }
                 Hit::LibSection(s) => {
                     self.library.section = s;
                     if self.logged_in {
@@ -4494,7 +4483,10 @@ mod playlist_tests {
         assert_eq!(app.tab, Tab::Lyrics);
         key(&mut app, KeyCode::Tab);
         assert_eq!(app.tab, Tab::Search);
-        assert!(!app.search.editing, "tabbing onto Search must not trap cursor in editing");
+        assert!(
+            !app.search.editing,
+            "tabbing onto Search must not trap cursor in editing"
+        );
         // Next Tab immediately advances to Library instead of hijacking to cycle filters.
         key(&mut app, KeyCode::Tab);
         assert_eq!(app.tab, Tab::Library);

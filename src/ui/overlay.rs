@@ -256,8 +256,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let r = centered(area, 60, h);
             f.render_widget(Clear, r);
             let block = frame(&t, "switch YouTube account").title_bottom(
-                Line::from(Span::styled("┐enter switch · esc close┌", Style::new().fg(t.inactive_fg)))
-                    .alignment(Alignment::Right),
+                Line::from(Span::styled(
+                    "┐enter switch · esc close┌",
+                    Style::new().fg(t.inactive_fg),
+                ))
+                .alignment(Alignment::Right),
             );
             let inner = block.inner(r);
             f.render_widget(block, r);

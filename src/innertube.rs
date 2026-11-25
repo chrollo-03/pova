@@ -185,7 +185,10 @@ impl AccountToken {
 /// One `SAPISID*HASH` entry, as the YouTube web client builds it.
 fn sid_authorization(scheme: &str, sid: &str, ts: u64, user_session: Option<&str>) -> String {
     match user_session {
-        Some(u) => format!("{scheme} {ts}_{}_u", sha1_hex(format!("{u} {ts} {sid} {ORIGIN}").as_bytes())),
+        Some(u) => format!(
+            "{scheme} {ts}_{}_u",
+            sha1_hex(format!("{u} {ts} {sid} {ORIGIN}").as_bytes())
+        ),
         None => format!("{scheme} {ts}_{}", sha1_hex(format!("{ts} {sid} {ORIGIN}").as_bytes())),
     }
 }
@@ -340,7 +343,10 @@ fn check_api_error(raw: &str) -> ytmapi_rs::Result<()> {
     };
     let code = err.get("code").and_then(Value::as_u64).unwrap_or(0);
     let message = err.get("message").and_then(Value::as_str).unwrap_or("");
-    Err(std::io::Error::other(format!("Http error code {code} recieved in response. Message: <{message}>.")).into())
+    Err(std::io::Error::other(format!(
+        "Http error code {code} recieved in response. Message: <{message}>."
+    ))
+    .into())
 }
 
 /// Read the account details for `cookies` from `music.youtube.com` and build
