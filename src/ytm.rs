@@ -242,7 +242,7 @@ Open the Library tab (b) to sign in again, or run `pova login`.";
 
 enum AuthOutcome {
     SignedIn {
-        client: Authed,
+        client: Box<Authed>,
     },
     NeedsBrowser {
         spec: String,
@@ -330,7 +330,7 @@ async fn verify_browser_login(spec: String, label: String, cookie_file: PathBuf,
 
     match verify_cookie(&cookie).await {
         Ok(yt) => match write_cookie_file(&cookie_file, &cookie) {
-            Ok(()) => AuthOutcome::SignedIn { client: yt },
+            Ok(()) => AuthOutcome::SignedIn { client: Box::new(yt) },
             Err(e) => AuthOutcome::Error {
                 message: format!("Signed in, but couldn't save the cookie file: {e}"),
             },
@@ -404,7 +404,7 @@ pub async fn run(
                                 Err(e) => AuthOutcome::Error { message: e.to_string() },
                                 Ok(cookie) => match verify_cookie(&cookie).await {
                                     Ok(yt) => match crate::auth::write_cookie_file(&cookie_file, &cookie) {
-                                        Ok(()) => AuthOutcome::SignedIn { client: yt },
+                                        Ok(()) => AuthOutcome::SignedIn { client: Box::new(yt) },
                                         Err(e) => AuthOutcome::Error {
                                             message: format!("Couldn't save cookie file: {e}"),
                                         },
@@ -513,7 +513,7 @@ pub async fn run(
                     AuthOutcome::SignedIn { client: yt } => {
                         cookie_stamp = file_stamp(&cookie_file);
                         saved_account = None;
-                        client = Some(Client::Auth(Box::new(yt)));
+                        client = Some(Client::Auth(yt));
                         let _ = events.send(YtmEvent::Auth {
                             logged_in: true,
                             message: None,
