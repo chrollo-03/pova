@@ -380,10 +380,12 @@ fn sha1_hex(data: &[u8]) -> String {
         msg.push(0);
     }
     msg.extend_from_slice(&bit_len.to_be_bytes());
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut w: Vec<u32> = chunk
-            .chunks_exact(4)
-            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| u32::from_be_bytes(*b))
             .collect();
         for i in 16..80 {
             let v = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);

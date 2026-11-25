@@ -6,7 +6,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table};
 
-use crate::app::{App, MenuItem, Overlay};
+use crate::app::{App, Hit, MenuItem, Overlay};
 use crate::keymap::Action;
 use crate::ui::banner;
 
@@ -37,6 +37,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .fg(t.selected_fg)
         .add_modifier(Modifier::BOLD);
     let Some(overlay) = app.overlay.as_mut() else { return };
+    let mut extra_hits: Vec<(Rect, Hit)> = Vec::new();
     match overlay {
         Overlay::Help { scroll } => {
             let r = centered(area, 72, area.height.saturating_sub(4).max(10));
@@ -100,6 +101,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 .collect();
             let table = Table::new(rows, [Constraint::Fill(1), Constraint::Length(9)]).row_highlight_style(sel);
             f.render_stateful_widget(table, inner, state);
+            let off = state.offset();
+            for row_i in 0..(inner.height as usize).min(names.len().saturating_sub(off)) {
+                extra_hits.push((
+                    Rect::new(inner.x, inner.y + row_i as u16, inner.width, 1),
+                    Hit::ThemeItem(off + row_i),
+                ));
+            }
         }
         Overlay::Menu { state } => {
             let state = *state;
@@ -142,19 +150,30 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 };
                 Span::styled(label, style)
             };
+            let yes_lbl = on_yes.confirm_label();
+            let no_lbl = "  No  ";
             let buttons = Line::from(vec![
-                button(on_yes.confirm_label(), *yes, true),
+                button(yes_lbl, *yes, true),
                 Span::raw("    "),
-                button("  No  ", !*yes, false),
+                button(no_lbl, !*yes, false),
             ]);
+            let btn_y = (inner.y + text_h + 2).min(inner.y + inner.height.saturating_sub(1));
             f.render_widget(
                 Paragraph::new(buttons).alignment(Alignment::Center),
                 Rect {
-                    y: (inner.y + text_h + 2).min(inner.y + inner.height.saturating_sub(1)),
+                    y: btn_y,
                     height: 1,
                     ..inner
                 },
             );
+            let yes_w = Span::raw(yes_lbl).width() as u16;
+            let no_w = Span::raw(no_lbl).width() as u16;
+            let total_w = yes_w + 4 + no_w;
+            if total_w <= inner.width {
+                let bx = inner.x + (inner.width - total_w) / 2;
+                extra_hits.push((Rect::new(bx, btn_y, yes_w, 1), Hit::Confirm(true)));
+                extra_hits.push((Rect::new(bx + yes_w + 4, btn_y, no_w, 1), Hit::Confirm(false)));
+            }
         }
         Overlay::AddToPlaylist {
             track,
@@ -220,8 +239,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                     ])
                 })),
             }
+            let row_count = rows.len();
             let table = Table::new(rows, [Constraint::Fill(1), Constraint::Length(20)]).row_highlight_style(sel);
             f.render_stateful_widget(table, body, state);
+            let off = state.offset();
+            for row_i in 0..(body.height as usize).min(row_count.saturating_sub(off)) {
+                extra_hits.push((
+                    Rect::new(body.x, body.y + row_i as u16, body.width, 1),
+                    Hit::PlaylistPick(off + row_i),
+                ));
+            }
         }
         Overlay::Accounts { items, state } => {
             let rows_n = items.as_ref().map_or(1, |v| v.len().max(1)) as u16;
@@ -239,6 +266,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 width: inner.width.saturating_sub(2),
                 ..inner
             };
+            let list_len = items.as_ref().map_or(0, Vec::len);
             let rows: Vec<Row> = match items {
                 None => vec![Row::new(vec![
                     Cell::from("loading your YouTube accounts & channels…").style(Style::new().fg(t.inactive_fg)),
@@ -259,7 +287,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             };
             let table = Table::new(rows, [Constraint::Fill(1), Constraint::Length(24)]).row_highlight_style(sel);
             f.render_stateful_widget(table, inner, state);
+            let off = state.offset();
+            for row_i in 0..(inner.height as usize).min(list_len.saturating_sub(off)) {
+                extra_hits.push((
+                    Rect::new(inner.x, inner.y + row_i as u16, inner.width, 1),
+                    Hit::AccountItem(off + row_i),
+                ));
+            }
         }
+    }
+    for (r, h) in extra_hits {
+        app.hits.add(r, h);
     }
 }
 
@@ -315,6 +353,7 @@ fn draw_menu(f: &mut Frame, app: &mut App, area: Rect, selected: usize) {
         };
         // One left-aligned column so the ‹ value › parts line up.
         f.render_widget(Paragraph::new(format!("   {label}")).style(style), row);
+        app.hits.add(row, Hit::MenuItem(i));
         y += 1;
     }
     let hint = "↑↓ select · enter/←→ change · esc close";

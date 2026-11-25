@@ -217,7 +217,7 @@ pub enum YtmEvent {
 #[derive(Clone)]
 enum Client {
     Anon(YtMusic<NoAuthToken>),
-    Auth(Authed),
+    Auth(Box<Authed>),
 }
 
 /// Run `$body` with `$yt` bound to whichever client variant we have.
@@ -480,7 +480,7 @@ pub async fn run(
                             page_id: page_id.clone(),
                             name: Some(name.clone()),
                         });
-                        client = Some(Client::Auth(switched));
+                        client = Some(Client::Auth(Box::new(switched)));
                         let _ = events.send(YtmEvent::AccountSwitched {
                             auth_user,
                             page_id,
@@ -513,7 +513,7 @@ pub async fn run(
                     AuthOutcome::SignedIn { client: yt } => {
                         cookie_stamp = file_stamp(&cookie_file);
                         saved_account = None;
-                        client = Some(Client::Auth(yt));
+                        client = Some(Client::Auth(Box::new(yt)));
                         let _ = events.send(YtmEvent::Auth {
                             logged_in: true,
                             message: None,
@@ -660,7 +660,7 @@ async fn connect(
                     logged_in: true,
                     message: None,
                 });
-                return Some(Client::Auth(yt));
+                return Some(Client::Auth(Box::new(yt)));
             }
             Err(CookieCheckError::Other(msg)) => {
                 tracing::warn!("cookie auth failed: {msg}");

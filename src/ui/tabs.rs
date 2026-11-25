@@ -284,6 +284,52 @@ fn table_style(t: &Theme) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+/// Compute the visible slice `[start..end]` for a list of `total` rows inside a
+/// viewport of `visible` rows, updating `state`'s scroll offset so selection
+/// stays in view. Lets long playlists render in O(visible) instead of O(total).
+fn window_bounds(total: usize, visible: usize, state: &mut ratatui::widgets::TableState) -> (usize, usize) {
+    if total == 0 || visible == 0 {
+        *state.offset_mut() = 0;
+        return (0, 0);
+    }
+    let max_offset = total.saturating_sub(visible);
+    let mut offset = state.offset().min(max_offset);
+    if let Some(sel) = state.selected() {
+        let sel = sel.min(total - 1);
+        if sel < offset {
+            offset = sel;
+        } else if sel >= offset + visible {
+            offset = sel + 1 - visible;
+        }
+    }
+    *state.offset_mut() = offset;
+    (offset, (offset + visible).min(total))
+}
+
+/// Sleek 1-column scrollbar on the right edge when `total > area.height`.
+fn draw_scrollbar(f: &mut Frame, area: Rect, t: &Theme, total: usize, offset: usize) {
+    let h = area.height as usize;
+    if total <= h || h == 0 || area.width == 0 {
+        return;
+    }
+    let thumb_h = ((h * h) / total).clamp(1, h);
+    let max_off = total.saturating_sub(h).max(1);
+    let thumb_top = (offset.min(max_off) * (h - thumb_h)) / max_off;
+    let x = area.x + area.width - 1;
+    for i in 0..h {
+        let in_thumb = i >= thumb_top && i < thumb_top + thumb_h;
+        let (sym, color) = if in_thumb {
+            ("┃", t.hi_fg)
+        } else {
+            ("│", t.div_line)
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(sym, Style::new().fg(color))),
+            Rect::new(x, area.y + i as u16, 1, 1),
+        );
+    }
+}
+
 pub fn queue(f: &mut Frame, app: &mut App, area: Rect) {
     let t = app.theme.clone();
     if app.queue.is_empty() {
@@ -305,11 +351,24 @@ pub fn queue(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     let cur = app.queue.current;
+    if app.queue_state.selected().is_none() {
+        app.queue_state.select(cur);
+    }
+    let total = app.queue.len();
+    let body_h = area.height.saturating_sub(1) as usize;
+    let has_sb = total > body_h && area.width > 12;
+    let table_area = Rect {
+        width: area.width.saturating_sub(u16::from(has_sb)),
+        ..area
+    };
+    let (start, end) = window_bounds(total, body_h, &mut app.queue_state);
     let rows: Vec<Row> = app
         .queue
         .entries
         .iter()
         .enumerate()
+        .skip(start)
+        .take(end - start)
         .map(|(i, e)| {
             let tr = &e.track;
             let is_cur = Some(i) == cur;
@@ -342,7 +401,7 @@ pub fn queue(f: &mut Frame, app: &mut App, area: Rect) {
             .style(style)
         })
         .collect();
-    let num_w = (app.queue.len().to_string().len() as u16).max(2);
+    let num_w = (total.to_string().len() as u16).max(2);
     let header = Row::new(vec!["", "#", "", "title", "artist", "time"]).style(Style::new().fg(t.hi_fg));
     let table = Table::new(
         rows,
@@ -358,16 +417,29 @@ pub fn queue(f: &mut Frame, app: &mut App, area: Rect) {
     .header(header)
     .column_spacing(1)
     .row_highlight_style(table_style(&t));
-    if app.queue_state.selected().is_none() {
-        app.queue_state.select(cur);
-    }
-    f.render_stateful_widget(table, area, &mut app.queue_state);
+    let mut view_state = ratatui::widgets::TableState::default()
+        .with_selected(app.queue_state.selected().and_then(|s| s.checked_sub(start)));
+    f.render_stateful_widget(table, table_area, &mut view_state);
     let list_area = Rect {
         y: area.y + 1,
         height: area.height.saturating_sub(1),
-        ..area
+        ..table_area
     };
-    app.hits.list = Some((list_area, app.queue_state.offset()));
+    if has_sb {
+        draw_scrollbar(
+            f,
+            Rect {
+                x: area.x + area.width - 1,
+                y: area.y + 1,
+                width: 1,
+                height: area.height.saturating_sub(1),
+            },
+            &t,
+            total,
+            start,
+        );
+    }
+    app.hits.list = Some((list_area, start));
     app.hits.add(list_area, Hit::List);
 }
 
@@ -462,13 +534,31 @@ fn browse(f: &mut Frame, app: &mut App, area: Rect, library: bool) {
         spans.push(Span::styled(format!("  {}", spinner()), Style::new().fg(t.accent)));
     } else if !lv.items.is_empty() {
         let n = lv.items.iter().filter(|i| !matches!(i, Item::Header(_))).count();
-        spans.push(Span::styled(format!("  {n} items"), Style::new().fg(t.inactive_fg)));
+        let count_text = match lv.state.selected() {
+            Some(sel) if lv.items.len() > body.height as usize => {
+                let pos = lv.items[..=sel.min(lv.items.len() - 1)]
+                    .iter()
+                    .filter(|i| !matches!(i, Item::Header(_)))
+                    .count();
+                format!("  {pos}/{n}")
+            }
+            _ => format!("  {n} items"),
+        };
+        spans.push(Span::styled(count_text, Style::new().fg(t.inactive_fg)));
     }
     if depth > 1 {
         spans.push(Span::styled(format!("  ‹{back} back›"), Style::new().fg(t.inactive_fg)));
     }
+    let mut acct_hit: Option<Rect> = None;
     if library {
-        spans.push(Span::styled("  ‹u account›", Style::new().fg(t.inactive_fg)));
+        let prefix_w: u16 = spans.iter().map(|s| s.width() as u16).sum();
+        let acct_lbl = "‹u account›";
+        let acct_w = Span::raw(acct_lbl).width() as u16;
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(acct_lbl, Style::new().fg(t.inactive_fg)));
+        if prefix_w + 2 + acct_w <= crumb.width {
+            acct_hit = Some(Rect::new(crumb.x + prefix_w + 2, crumb.y, acct_w, 1));
+        }
     }
     f.render_widget(Paragraph::new(Line::from(spans)), crumb);
 
@@ -480,10 +570,16 @@ fn browse(f: &mut Frame, app: &mut App, area: Rect, library: bool) {
             .map(|l| Line::from(Span::styled(l, Style::new().fg(t.error))))
             .collect();
         centered_msg(f, body, &t, lines);
+        if let Some(r) = acct_hit {
+            app.hits.add(r, Hit::SwitchAccount);
+        }
         return;
     }
     if lv.loading && lv.items.is_empty() {
         centered_msg(f, body, &t, vec![Line::from(format!("{} loading…", spinner()))]);
+        if let Some(r) = acct_hit {
+            app.hits.add(r, Hit::SwitchAccount);
+        }
         return;
     }
     if library && lv.items.is_empty() {
@@ -497,9 +593,20 @@ fn browse(f: &mut Frame, app: &mut App, area: Rect, library: bool) {
                 Line::from("on a YouTube Brand Account? press u to switch account"),
             ],
         );
+        if let Some(r) = acct_hit {
+            app.hits.add(r, Hit::SwitchAccount);
+        }
         return;
     }
-    let rows = item_rows(&t, &lv.items, playing.as_deref(), likes);
+    let total = lv.items.len();
+    let visible_h = body.height as usize;
+    let has_sb = total > visible_h && body.width > 12;
+    let table_area = Rect {
+        width: body.width.saturating_sub(u16::from(has_sb)),
+        ..body
+    };
+    let (start, end) = window_bounds(total, visible_h, &mut lv.state);
+    let rows = item_rows(&t, &lv.items[start..end], playing.as_deref(), likes);
     let table = Table::new(
         rows,
         [
@@ -511,10 +618,28 @@ fn browse(f: &mut Frame, app: &mut App, area: Rect, library: bool) {
     )
     .column_spacing(1)
     .row_highlight_style(table_style(&t));
-    f.render_stateful_widget(table, body, &mut lv.state);
-    let offset = lv.state.offset();
-    app.hits.list = Some((body, offset));
-    app.hits.add(body, Hit::List);
+    let mut view_state = ratatui::widgets::TableState::default()
+        .with_selected(lv.state.selected().and_then(|s| s.checked_sub(start)));
+    f.render_stateful_widget(table, table_area, &mut view_state);
+    if has_sb {
+        draw_scrollbar(
+            f,
+            Rect {
+                x: body.x + body.width - 1,
+                y: body.y,
+                width: 1,
+                height: body.height,
+            },
+            &t,
+            total,
+            start,
+        );
+    }
+    if let Some(r) = acct_hit {
+        app.hits.add(r, Hit::SwitchAccount);
+    }
+    app.hits.list = Some((table_area, start));
+    app.hits.add(table_area, Hit::List);
 }
 
 fn chips<T: Copy + PartialEq>(
@@ -591,9 +716,18 @@ pub fn search(f: &mut Frame, app: &mut App, area: Rect) {
             ..input
         },
     );
+    let badge = if app.search.editing {
+        "typing · esc done"
+    } else {
+        "/ search"
+    };
+    let badge_w = Span::raw(badge).width() as u16 + 1;
+    let show_badge = input.width > prompt_w + badge_w + 14;
     let field = Rect {
         x: input.x + prompt_w,
-        width: input.width.saturating_sub(prompt_w),
+        width: input
+            .width
+            .saturating_sub(prompt_w + if show_badge { badge_w } else { 0 }),
         ..input
     };
     let mut scroll_x = 0u16;
@@ -605,6 +739,22 @@ pub fn search(f: &mut Frame, app: &mut App, area: Rect) {
         f.set_cursor_position((cx.min(field.x + field.width.saturating_sub(1)), field.y));
     }
     f.render_widget(Paragraph::new(Line::from(line)).scroll((0, scroll_x)), field);
+    if show_badge {
+        let badge_style = if app.search.editing {
+            Style::new().fg(t.hi_fg)
+        } else {
+            Style::new().fg(t.inactive_fg)
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(badge, badge_style)).alignment(Alignment::Right),
+            Rect {
+                x: input.x + input.width - badge_w,
+                width: badge_w,
+                ..input
+            },
+        );
+    }
+    app.hits.add(input, Hit::SearchInput);
     // Divider under the input, btop style.
     f.render_widget(
         Paragraph::new("─".repeat(gap.width as usize)).style(Style::new().fg(t.div_line)),
@@ -616,13 +766,14 @@ pub fn search(f: &mut Frame, app: &mut App, area: Rect) {
     chips(f, app, filters, &items, active, Hit::SearchFilter);
 
     if app.search.stack.is_empty() {
+        let k = app.keymap.hint(Action::TabSearch);
         centered_msg(
             f,
             body,
             &t,
             vec![
-                Line::from("type and press enter"),
-                Line::from("tab switches the filter while typing"),
+                Line::from(format!("press {k} or enter to search YouTube Music")),
+                Line::from("tab switches tabs (or filters while typing)"),
             ],
         );
     } else {

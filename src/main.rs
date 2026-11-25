@@ -30,7 +30,7 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui_image::picker::Picker;
@@ -481,7 +481,30 @@ async fn run(cli: Cli, cfg: Config, paths: Paths, state: State) -> anyhow::Resul
         loop {
             tokio::select! {
                 ev = events.next() => match ev {
-                    Some(Ok(ev)) => app.on_terminal(ev),
+                    Some(Ok(ev)) => {
+                        app.on_terminal(ev);
+                        // Drain any burst of queued input events (rapid Tab / scroll / key repeat)
+                        // so we coalesce them into one immediate zero-latency frame.
+                        for _ in 0..32 {
+                            match events.next().now_or_never() {
+                                Some(Some(Ok(next))) => app.on_terminal(next),
+                                Some(Some(Err(e))) => return Err(e).context("reading terminal events"),
+                                Some(None) => {
+                                    app.quit = true;
+                                    break;
+                                }
+                                None => break,
+                            }
+                        }
+                        if !app.quit && app.tick() {
+                            let mut want = 0;
+                            terminal.draw(|f| want = ui::draw(f, &mut app))?;
+                            if want > 0 {
+                                viz.set_bars(want);
+                            }
+                            last_draw = Instant::now();
+                        }
+                    }
                     Some(Err(e)) => return Err(e).context("reading terminal events"),
                     None => break,
                 },

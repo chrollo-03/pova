@@ -349,9 +349,11 @@ pub enum Hit {
     Progress,
     Volume,
     List,
+    SearchInput,
     SearchFilter(SearchFilter),
     LibSection(LibSection),
     Suggestion(usize),
+    SwitchAccount,
     Auth,
     AuthProfile(usize),
     AuthCustomBrowser,
@@ -359,6 +361,11 @@ pub enum Hit {
     AuthCheckNow,
     AuthOpenBrowser,
     AuthCancel,
+    MenuItem(usize),
+    ThemeItem(usize),
+    AccountItem(usize),
+    PlaylistPick(usize),
+    Confirm(bool),
     CloseError,
 }
 
@@ -1189,6 +1196,7 @@ impl App {
                 self.player(PlayerCmd::SetVolume(self.player.volume));
             }
             PlayerEvent::TimePos(t) => {
+                let prev = self.player.time;
                 self.player.time = t;
                 if t > 0.0 {
                     self.consecutive_errors = 0;
@@ -1197,15 +1205,16 @@ impl App {
                         tracing::info!("track started in {} ms ({how})", t0.elapsed().as_millis());
                     }
                 }
-                if matches!(
-                    self.lyrics,
-                    LyricsState::Found {
-                        lyrics: Lyrics::Synced(_),
-                        ..
-                    }
-                ) || self.tab == Tab::NowPlaying
-                    || self.show_controls
-                {
+                let synced_lyrics = self.tab == Tab::Lyrics
+                    && matches!(
+                        self.lyrics,
+                        LyricsState::Found {
+                            lyrics: Lyrics::Synced(_),
+                            ..
+                        }
+                    );
+                let step_changed = (prev * 4.0) as u64 != (t * 4.0) as u64;
+                if synced_lyrics || ((self.tab == Tab::NowPlaying || self.show_controls) && step_changed) {
                     self.dirty = true;
                 }
                 return;
@@ -1983,6 +1992,22 @@ impl App {
         if self.tab == Tab::Search && self.search.editing && self.on_edit_key(k) {
             return;
         }
+        if self.tab == Tab::Search
+            && !self.search.editing
+            && self.search.stack.is_empty()
+            && k.code == KeyCode::Enter
+        {
+            self.search.editing = true;
+            self.search.cursor = self.search.input.chars().count();
+            return;
+        }
+        if k.code == KeyCode::Backspace
+            && ((self.tab == Tab::Search && self.search.stack.len() > 1)
+                || (self.tab == Tab::Library && self.library.stack.len() > 1))
+        {
+            self.back_or_menu();
+            return;
+        }
         if let Some(action) = self.keymap.action(&k) {
             self.dispatch(action);
         }
@@ -2195,8 +2220,22 @@ impl App {
             KeyCode::Right => s.cursor = (s.cursor + 1).min(s.input.chars().count()),
             KeyCode::Home => s.cursor = 0,
             KeyCode::End => s.cursor = s.input.chars().count(),
-            KeyCode::Tab => self.cycle_filter(true),
-            KeyCode::BackTab => self.cycle_filter(false),
+            KeyCode::Tab => {
+                if s.input.trim().is_empty() {
+                    s.editing = false;
+                    self.dispatch(Action::TabNext);
+                    return true;
+                }
+                self.cycle_filter(true);
+            }
+            KeyCode::BackTab => {
+                if s.input.trim().is_empty() {
+                    s.editing = false;
+                    self.dispatch(Action::TabPrev);
+                    return true;
+                }
+                self.cycle_filter(false);
+            }
             KeyCode::Char(c) if !ctrl => self.insert_char(c),
             _ => return false,
         }
@@ -2246,13 +2285,12 @@ impl App {
     }
 
     fn set_tab(&mut self, tab: Tab) {
+        if tab != Tab::Search {
+            self.search.editing = false;
+        }
         self.tab = tab;
         match tab {
-            Tab::Search => {
-                if self.search.stack.is_empty() {
-                    self.search.editing = true;
-                }
-            }
+            Tab::Search => {}
             Tab::Library => {
                 if self.logged_in {
                     if self.library.stack.is_empty() {
@@ -3129,11 +3167,100 @@ impl App {
             self.flash = None;
             return;
         }
-        if let Some(overlay) = self.overlay.take() {
-            if let Overlay::Themes { original, .. } = overlay {
-                self.theme = original;
+        if self.overlay.is_some() {
+            match self.hits.at(x, y).map(|(_, h)| h) {
+                Some(Hit::MenuItem(i)) => {
+                    if let Some(&item) = MenuItem::ALL.get(i) {
+                        if item.is_setting() {
+                            if let Some(Overlay::Menu { state }) = self.overlay.as_mut() {
+                                state.select(Some(i));
+                            }
+                            self.activate_menu(item, true);
+                        } else {
+                            self.overlay = None;
+                            self.activate_menu(item, true);
+                        }
+                    }
+                    return;
+                }
+                Some(Hit::ThemeItem(i)) => {
+                    if let Some(Overlay::Themes { state, .. }) = self.overlay.as_mut() {
+                        state.select(Some(i));
+                        self.preview_theme();
+                        self.overlay = None;
+                        self.save_state();
+                        self.flash(format!("Theme: {}", self.theme.name), false);
+                    }
+                    return;
+                }
+                Some(Hit::AccountItem(i)) => {
+                    let chosen = match self.overlay.as_ref() {
+                        Some(Overlay::Accounts { items: Some(list), .. }) => list.get(i).cloned(),
+                        _ => None,
+                    };
+                    if let Some(acct) = chosen {
+                        self.overlay = None;
+                        let _ = self.tx.ytm.send(YtmReq::SwitchAccount {
+                            auth_user: acct.auth_user,
+                            page_id: acct.page_id,
+                            name: acct.name,
+                        });
+                    }
+                    return;
+                }
+                Some(Hit::PlaylistPick(i)) => {
+                    let mut start_naming = false;
+                    let mut chosen: Option<(String, String, String, String)> = None;
+                    if let Some(Overlay::AddToPlaylist {
+                        track,
+                        playlists,
+                        naming,
+                        ..
+                    }) = self.overlay.as_mut()
+                        && naming.is_none()
+                    {
+                        if i == 0 {
+                            *naming = Some(String::new());
+                            start_naming = true;
+                        } else if let Some(p) = playlists.as_ref().and_then(|list| list.get(i - 1)) {
+                            chosen = Some((
+                                p.id.clone(),
+                                p.title.clone(),
+                                track.video_id.clone(),
+                                track.title.clone(),
+                            ));
+                        }
+                    }
+                    if start_naming {
+                        return;
+                    }
+                    if let Some((playlist_id, playlist_title, video_id, title)) = chosen {
+                        let _ = self.tx.ytm.send(YtmReq::AddToPlaylist {
+                            playlist_id,
+                            playlist_title: playlist_title.clone(),
+                            video_id,
+                            title,
+                        });
+                        self.overlay = None;
+                        self.flash(format!("Adding to {playlist_title}…"), false);
+                        return;
+                    }
+                }
+                Some(Hit::Confirm(yes)) => {
+                    if let Some(Overlay::Confirm { on_yes, .. }) = self.overlay.take()
+                        && yes
+                    {
+                        self.confirmed(on_yes);
+                    }
+                    return;
+                }
+                _ => {
+                    if let Some(Overlay::Themes { original, .. }) = self.overlay.take() {
+                        self.theme = original;
+                    }
+                    return;
+                }
             }
-            return;
         }
         let double = self
             .last_click
@@ -3160,12 +3287,23 @@ impl App {
                         }
                     }
                 }
+                Hit::SearchInput => {
+                    self.tab = Tab::Search;
+                    self.search.editing = true;
+                    self.search.cursor = self.search.input.chars().count();
+                }
                 Hit::SearchFilter(f) => {
                     self.search.filter = f;
                     if !self.search.input.trim().is_empty() {
                         self.submit_search();
                     }
                 }
+                Hit::SwitchAccount => self.open_accounts(),
+                Hit::MenuItem(_)
+                | Hit::ThemeItem(_)
+                | Hit::AccountItem(_)
+                | Hit::PlaylistPick(_)
+                | Hit::Confirm(_) => {}
                 Hit::LibSection(s) => {
                     self.library.section = s;
                     if self.logged_in {
@@ -4344,6 +4482,31 @@ mod playlist_tests {
         assert!(reqs(&mut rx).iter().any(|r| matches!(r, YtmReq::OpenSignInLink { .. })));
         key(&mut app, KeyCode::Esc);
         assert!(app.library.auth.waiting.is_none());
+    }
+
+    #[test]
+    fn tab_cycling_does_not_trap_on_search() {
+        let (mut app, _rx) = app();
+        assert_eq!(app.tab, Tab::NowPlaying);
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(app.tab, Tab::Queue);
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(app.tab, Tab::Lyrics);
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(app.tab, Tab::Search);
+        assert!(!app.search.editing, "tabbing onto Search must not trap cursor in editing");
+        // Next Tab immediately advances to Library instead of hijacking to cycle filters.
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(app.tab, Tab::Library);
+
+        // Even if the user enters Search editing with '/' and hasn't typed anything yet,
+        // Tab still exits editing and moves to Library smoothly.
+        key(&mut app, KeyCode::Char('/'));
+        assert_eq!(app.tab, Tab::Search);
+        assert!(app.search.editing);
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(app.tab, Tab::Library);
+        assert!(!app.search.editing);
     }
 
     #[test]

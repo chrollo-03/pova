@@ -81,9 +81,17 @@ fn border_label<'a>(theme: &Theme, border: Color, hotkey: Option<u8>, text: &'a 
 /// A tab label with its hotkey letter highlighted, btop style.
 fn tab_label<'a>(theme: &Theme, border: Color, label: &'a str, key_at: usize, active: bool) -> Vec<Span<'a>> {
     let base = if active {
-        Style::new().fg(theme.title).add_modifier(Modifier::BOLD)
+        Style::new()
+            .bg(theme.selected_bg)
+            .fg(theme.selected_fg)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::new().fg(theme.graph_text)
+    };
+    let key_style = if active {
+        base.add_modifier(Modifier::UNDERLINED)
+    } else {
+        base.fg(theme.hi_fg).add_modifier(Modifier::UNDERLINED)
     };
     let (pre, rest) = label.split_at(key_at);
     let mut chars = rest.chars();
@@ -92,7 +100,7 @@ fn tab_label<'a>(theme: &Theme, border: Color, label: &'a str, key_at: usize, ac
     vec![
         Span::styled("┐", Style::new().fg(border)),
         Span::styled(pre, base),
-        Span::styled(key, base.fg(theme.hi_fg).add_modifier(Modifier::UNDERLINED)),
+        Span::styled(key, key_style),
         Span::styled(post, base),
         Span::styled("┌", Style::new().fg(border)),
     ]
