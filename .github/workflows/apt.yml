@@ -1,10 +1,10 @@
 name: apt repository
 
 # Publishes pova's signed apt repository on GitHub Pages
-# (https://p0r0ro.github.io/pova/apt). It holds the .deb files of the last
-# three releases: the same files release.yml built, tested and attached to
-# each release, so apt users get the same binary as every other channel.
-# Runs after every successful release build, or by hand.
+# (https://chrollo-03.github.io/pova/apt). It holds the .deb files (amd64 &
+# arm64) of the last three releases: the same files release.yml built, tested
+# and attached to each release, so apt users get the same binary as every other
+# channel. Runs after every successful release build, or by hand.
 on:
   workflow_run:
     workflows: ["Release binaries"]
@@ -37,6 +37,7 @@ jobs:
         env:
           APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
           APT_SIGNING_PASSPHRASE: ${{ secrets.APT_SIGNING_PASSPHRASE }}
+          APT_URL: https://chrollo-03.github.io/pova/apt
         run: |
           if [ -z "$APT_SIGNING_KEY" ]; then
             echo "::error::the APT_SIGNING_KEY secret is missing; see docs/development.md"
@@ -44,7 +45,8 @@ jobs:
           fi
           scripts/apt-repo.sh build debs site/apt
           # A landing page for the Pages root.
-          printf '<!doctype html><meta http-equiv="refresh" content="0; url=https://github.com/P0r0ro/pova">\n' > site/index.html
+          printf '<!doctype html><meta http-equiv="refresh" content="0; url=https://github.com/%s">\n' \
+            "${GITHUB_REPOSITORY}" > site/index.html
 
       - name: Install pova from it on clean Debian and Ubuntu
         run: |

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 — browser sign-in, Brand Accounts, smoother UI & multi-arch packages
 
 - **One-click browser profile sign-in and `pova login` / `pova logout`.** The
   Library tab now shows the `https://music.youtube.com` link right away along
@@ -11,6 +11,24 @@
   with Google. Also adds custom profile input (`p`), masked manual paste (`c`),
   `Sign in` / `Sign out` in the Esc menu, clickable login status in the player
   border, and `pova login` / `pova logout` CLI commands without `python3`.
+- **YouTube Brand Account support & explicit account switcher.** Bootstraps
+  YouTube Music's active session (`ytcfg`), signs requests with session-bound
+  `SAPISIDHASH` (`1P`/`3P`) plus `X-Goog-AuthUser` / `X-Goog-PageId` /
+  `onBehalfOfUser`, shows the active account name in the player border, and
+  adds an explicit account switcher (`u` in Library or **Switch account** in
+  the Esc menu) saved across restarts.
+- **Instant Search tab switching & smoother UI/UX.** Cycling onto the Search
+  tab with `Tab` / `Shift+Tab` / `2` no longer traps you in edit mode (press
+  `/` or `Enter` to type, `Backspace` to step back out of nested views).
+  Coalesces bursts of terminal input with immediate redraws, throttles
+  non-lyrics playback redraws, renders Queue and Browse lists windowed with a
+  vertical scrollbar and `pos/total` counter, and makes all overlay rows and
+  buttons clickable.
+- **Multi-arch releases, Arch package, Nix Flake & one-line installer.** Adds
+  native Linux `aarch64` (`arm64`) `.deb`, `.rpm`, `.AppImage`, and `.tar.gz`
+  packages, a native Arch Linux `.pkg.tar.zst` package, a multi-arch signed
+  `apt` repository on GitHub Pages, `flake.nix`, `scripts/install.sh`, and a
+  unified `SHA256SUMS` manifest.
 
 ## 1.2.2 — Catppuccin themes
 

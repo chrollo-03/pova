@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Keep every release channel on the same version.
 #
-#   scripts/release.sh bump 1.1.0   before tagging: Cargo.toml + Cargo.lock,
+#   scripts/release.sh bump 1.3.0   before tagging: Cargo.toml + Cargo.lock,
 #                                   the README's install commands, the COPR
 #                                   spec and the AUR package
 #   scripts/release.sh aur          after the GitHub release is published:
@@ -10,11 +10,12 @@
 #                                   on Fedora COPR (needs ~/.config/copr)
 #   scripts/release.sh check        every channel matches Cargo.toml
 #
-# The .rpm, .deb, AppImage and tarball are all built by
+# The .rpm, .deb, AppImage, Arch .pkg.tar.zst and tarball are all built by
 # .github/workflows/release.yml from the same tag, so they can't drift.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
+REPO=${REPO:-chrollo-03/pova}
 current() { sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1; }
 esc() { printf '%s' "$1" | sed 's/\./\\./g'; }
 aur=packaging/aur/pova-bin
@@ -44,17 +45,10 @@ bump() {
   sed -i "s/$o/$new/g" README.md
   sed -i "s/^Version: .*/Version:        $new/" "$spec"
   local stamp; stamp=$(LC_ALL=C date '+%a %b %d %Y')
-  sed -i "/^%changelog/a * $stamp P0r0ro <250746769+P0r0ro@users.noreply.github.com> - $new-1\n- pova $new\n" "$spec"
+  sed -i "/^%changelog/a * $stamp chrollo-03 <chrollo-03@users.noreply.github.com> - $new-1\n- pova $new\n" "$spec"
   sed -i "s/^pkgver=.*/pkgver=$new/; s/^pkgrel=.*/pkgrel=1/" "$aur/PKGBUILD"
   sed -i "s/$o/$new/g; s/pkgrel = .*/pkgrel = 1/" "$aur/.SRCINFO"
-  echo "Bumped $old -> $new. Next (main is protected, so through PRs):"
-  echo "  1. add a CHANGELOG.md entry, commit on a branch, open a PR"
-  echo "  2. rehearse: gh workflow run release.yml --ref <branch> -f tag=<branch> -f publish=false"
-  echo "  3. merge the PR once CI is green"
-  echo "  4. on main: git tag -a v$new -m 'pova $new' && git push origin v$new"
-  echo "     (CI builds and tests .rpm .deb AppImage tarball, uploads them, publishes to crates.io)"
-  echo "  5. scripts/release.sh copr                          (Fedora COPR build of the tag)"
-  echo "  6. scripts/release.sh aur on a branch, PR, merge   (AUR checksums)"
+  echo "Bumped $old -> $new."
   check
 }
 
@@ -64,9 +58,9 @@ aur_sums() {
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' RETURN
   local urls=(
-    "https://github.com/P0r0ro/pova/releases/download/v$v/pova-v$v-x86_64-linux.tar.gz"
-    "https://raw.githubusercontent.com/P0r0ro/pova/v$v/packaging/appimage/pova.desktop"
-    "https://raw.githubusercontent.com/P0r0ro/pova/v$v/packaging/appimage/pova.png"
+    "https://github.com/${REPO}/releases/download/v$v/pova-v$v-x86_64-linux.tar.gz"
+    "https://raw.githubusercontent.com/${REPO}/v$v/packaging/appimage/pova.desktop"
+    "https://raw.githubusercontent.com/${REPO}/v$v/packaging/appimage/pova.png"
   )
   local sums=()
   for u in "${urls[@]}"; do
@@ -93,7 +87,7 @@ copr_build() {
   git rev-parse -q --verify "refs/tags/v$v" > /dev/null || { echo "tag v$v doesn't exist yet" >&2; return 1; }
   local copr=(uv tool run --from copr-cli copr-cli)
   command -v copr-cli > /dev/null && copr=(copr-cli)
-  "${copr[@]}" edit-package-scm pova --name pova --clone-url https://github.com/P0r0ro/pova \
+  "${copr[@]}" edit-package-scm pova --name pova --clone-url "https://github.com/${REPO}" \
     --commit "v$v" --method make_srpm --webhook-rebuild off
   "${copr[@]}" build-package pova --name pova
 }

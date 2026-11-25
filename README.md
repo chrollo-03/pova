@@ -12,12 +12,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/P0r0ro/pova/releases/latest"><img src="https://img.shields.io/github/v/release/P0r0ro/pova" alt="Latest release"></a>
-  <a href="https://crates.io/crates/pova"><img src="https://img.shields.io/crates/v/pova" alt="crates.io version"></a>
-  <a href="https://crates.io/crates/pova"><img src="https://img.shields.io/crates/d/pova" alt="crates.io downloads"></a>
-  <a href="https://copr.fedorainfracloud.org/coprs/p0r0ro/pova/"><img src="https://copr.fedorainfracloud.org/coprs/p0r0ro/pova/package/pova/status_image/last_build.png" alt="Fedora COPR build"></a>
-  <a href="https://github.com/P0r0ro/pova/actions/workflows/ci.yml"><img src="https://github.com/P0r0ro/pova/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/P0r0ro/pova" alt="MIT license"></a>
+  <a href="https://github.com/chrollo-03/pova/releases/latest"><img src="https://img.shields.io/github/v/release/chrollo-03/pova" alt="Latest release"></a>
+  <a href="https://github.com/chrollo-03/pova/actions/workflows/ci.yml"><img src="https://github.com/chrollo-03/pova/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/chrollo-03/pova/actions/workflows/release.yml"><img src="https://github.com/chrollo-03/pova/actions/workflows/release.yml/badge.svg" alt="Releases"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/chrollo-03/pova" alt="MIT license"></a>
   <a href="https://ratatui.rs/"><img src="https://ratatui.rs/built-with-ratatui/badge.svg" alt="Built With Ratatui"></a>
 </p>
 
@@ -52,107 +50,122 @@ kitty shows real album art (other terminals get a blocky version).
 
 | Method | Best for | Installs mpv, yt-dlp and the PipeWire tools for you |
 |---|---|---|
-| [Fedora COPR](#fedora-copr) | Fedora: one command, updates with your system | yes |
-| [apt repository](#debian-and-ubuntu-apt) | Debian, Ubuntu, Linux Mint, Pop!_OS: updates with your system | yes |
-| [`.rpm` package](#fedora-rpm) | Fedora and other dnf-based distros, without adding a repository | yes |
-| [`.deb` package](#debian-and-ubuntu-deb) | apt-based distros, without adding a repository | yes |
-| [AppImage](#appimage) | any distro, nothing to install | no |
-| [Prebuilt binary](#prebuilt-binary) | any distro, a single file in your `PATH` | no |
-| [crates.io](#from-cratesio-or-source) | Rust users, other CPU architectures | no |
+| [One-line installer](#one-line-installer) | Any Linux distro (`x86_64` and `aarch64`): auto-detects and verifies checksums | yes (via dnf/apt/pacman) |
+| [apt repository](#debian-and-ubuntu-apt) | Debian, Ubuntu, Linux Mint, Pop!_OS (`amd64` & `arm64`): updates with your system | yes |
+| [`.rpm` package](#fedora-rpm) | Fedora and other dnf-based distros (`x86_64` & `aarch64`) | yes |
+| [`.deb` package](#debian-and-ubuntu-deb) | apt-based distros (`amd64` & `arm64`), without adding a repository | yes |
+| [Arch Linux package](#arch-linux-pkgtarzst--pkgbuild) | Arch, EndeavourOS, CachyOS, Manjaro (`.pkg.tar.zst` or `PKGBUILD`) | yes |
+| [AppImage](#appimage) | Any distro (`x86_64` & `aarch64`), nothing to install | no |
+| [Prebuilt binary](#prebuilt-binary) | Any distro (`x86_64` & `aarch64`), a single file in your `PATH` | no |
+| [Nix Flake](#nix--nixos) | NixOS and Nix users (`x86_64` & `aarch64`) | yes |
+| [From source](#from-source) | Rust users and other CPU architectures | no |
 
-Every file is on the [latest release](https://github.com/P0r0ro/pova/releases/latest)
-page, with a `.sha256` checksum next to it. The commands below use version 1.2.2.
+Every file is on the [latest release](https://github.com/chrollo-03/pova/releases/latest)
+page, with per-file `.sha256` files and a combined `SHA256SUMS` manifest. The
+commands below use version 1.3.0.
 
-**Coming soon:** the Arch AUR package (`yay -S pova-bin`). It's built and
-tested, and waits on an account.
+### One-line installer
 
-### Fedora (COPR)
-
-The easiest way on Fedora: add pova's [COPR repository](https://copr.fedorainfracloud.org/coprs/p0r0ro/pova/)
-once, and from then on pova updates along with the rest of your system. `dnf`
-pulls in mpv, yt-dlp and pipewire-utils, and pova shows up in your app menu.
+Auto-detects your distro and CPU architecture (`x86_64` or `aarch64`), verifies
+the SHA-256 checksum, and installs the native `.rpm`, `.deb`, `.pkg.tar.zst`,
+or binary package:
 
 ```sh
-sudo dnf copr enable p0r0ro/pova
-sudo dnf install pova
+curl -fsSL https://raw.githubusercontent.com/chrollo-03/pova/main/scripts/install.sh | bash
 ```
 
-Built for Fedora 43, 44, 45 and rawhide.
+Force a specific method with `--method binary`, `--method appimage`, `--method rpm`,
+`--method deb`, or `--method pacman`.
 
 ### Debian and Ubuntu (apt)
 
-Add pova's apt repository once, and from then on pova updates with
-`sudo apt upgrade` like everything else. `apt` pulls in mpv, yt-dlp and
-pipewire-bin, and pova shows up in your app menu. Works on Debian, Ubuntu,
-Linux Mint, Pop!_OS and other apt-based distros.
+Add the signed apt repository once, and from then on pova updates with
+`sudo apt upgrade` like everything else. Supports both `amd64` and `arm64`,
+pulls in `mpv`, `yt-dlp`, and `pipewire-bin`, and adds pova to your app menu.
 
 ```sh
 sudo install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://p0r0ro.github.io/pova/apt/pova.gpg | sudo tee /etc/apt/keyrings/pova.gpg > /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/pova.gpg] https://p0r0ro.github.io/pova/apt stable main" | sudo tee /etc/apt/sources.list.d/pova.list
+curl -fsSL https://chrollo-03.github.io/pova/apt/pova.gpg | sudo tee /etc/apt/keyrings/pova.gpg > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/pova.gpg] https://chrollo-03.github.io/pova/apt stable main" | sudo tee /etc/apt/sources.list.d/pova.list
 sudo apt update && sudo apt install pova
 ```
 
-The repository holds the same `.deb` as the release page, signed with pova's
-own key.
-
 ### Fedora (.rpm)
 
-`dnf` installs pova and pulls in mpv, yt-dlp and pipewire-utils from Fedora's
-own repositories. pova also shows up in your app menu.
+`dnf` installs pova and pulls in `mpv`, `yt-dlp`, and `pipewire-utils` from
+Fedora's own repositories, and adds pova to your app menu.
 
 ```sh
-sudo dnf install https://github.com/P0r0ro/pova/releases/download/v1.2.2/pova-1.2.2-1.x86_64.rpm
+# x86_64
+sudo dnf install https://github.com/chrollo-03/pova/releases/download/v1.3.0/pova-1.3.0-1.x86_64.rpm
+
+# aarch64
+sudo dnf install https://github.com/chrollo-03/pova/releases/download/v1.3.0/pova-1.3.0-1.aarch64.rpm
 ```
 
 ### Debian and Ubuntu (.deb)
 
-`apt` installs pova and pulls in mpv, yt-dlp and pipewire-bin. pova also shows
-up in your app menu.
+`apt` installs pova and pulls in `mpv`, `yt-dlp`, and `pipewire-bin`.
 
 ```sh
-curl -LO https://github.com/P0r0ro/pova/releases/download/v1.2.2/pova_1.2.2-1_amd64.deb
-sudo apt install ./pova_1.2.2-1_amd64.deb
+# amd64 (use arm64 on aarch64)
+curl -LO https://github.com/chrollo-03/pova/releases/download/v1.3.0/pova_1.3.0-1_amd64.deb
+sudo apt install ./pova_1.3.0-1_amd64.deb
 ```
 
-On older releases such as Ubuntu 22.04, the distro's yt-dlp is often too old
+On older releases such as Ubuntu 22.04, the distro's `yt-dlp` is often too old
 for YouTube. If songs won't start, get a current one with `pipx install yt-dlp`.
+
+### Arch Linux (`.pkg.tar.zst` & `PKGBUILD`)
+
+Install the prebuilt pacman package directly (pulls in `mpv`, `yt-dlp`, and
+`pipewire-audio`):
+
+```sh
+curl -LO https://github.com/chrollo-03/pova/releases/download/v1.3.0/pova-bin-1.3.0-1-x86_64.pkg.tar.zst
+sudo pacman -U ./pova-bin-1.3.0-1-x86_64.pkg.tar.zst
+```
+
+Or build the package locally from `packaging/aur/pova-bin/PKGBUILD` with `makepkg -si`.
 
 ### AppImage
 
-One file that runs on any distro. You install pova's helpers yourself
-([see below](#the-helpers-pova-needs)).
+One file that runs on any distro (`x86_64` or `aarch64`). You install pova's
+helpers yourself ([see below](#the-helpers-pova-needs)).
 
 ```sh
-curl -LO https://github.com/P0r0ro/pova/releases/download/v1.2.2/pova-v1.2.2-x86_64.AppImage
-chmod +x pova-v1.2.2-x86_64.AppImage
-./pova-v1.2.2-x86_64.AppImage
+curl -LO https://github.com/chrollo-03/pova/releases/download/v1.3.0/pova-v1.3.0-x86_64.AppImage
+chmod +x pova-v1.3.0-x86_64.AppImage
+./pova-v1.3.0-x86_64.AppImage
 ```
 
 ### Prebuilt binary
 
-A plain binary plus the sign-in helper. You install pova's helpers yourself
-([see below](#the-helpers-pova-needs)).
+A plain binary plus the sign-in helper (`x86_64` or `aarch64`). You install
+pova's helpers yourself ([see below](#the-helpers-pova-needs)).
 
 ```sh
-curl -LO https://github.com/P0r0ro/pova/releases/download/v1.2.2/pova-v1.2.2-x86_64-linux.tar.gz
-tar xzf pova-v1.2.2-x86_64-linux.tar.gz
-install -Dm755 pova-v1.2.2-x86_64-linux/pova ~/.local/bin/pova
+curl -LO https://github.com/chrollo-03/pova/releases/download/v1.3.0/pova-v1.3.0-x86_64-linux.tar.gz
+tar xzf pova-v1.3.0-x86_64-linux.tar.gz
+install -Dm755 pova-v1.3.0-x86_64-linux/pova ~/.local/bin/pova
 ```
 
-### From crates.io or source
+### Nix / NixOS
 
-Needs a Rust toolchain from <https://rustup.rs>. pova is
-[on crates.io](https://crates.io/crates/pova):
+Includes `mpv`, `yt-dlp`, `pipewire`, and `nodejs` wrapped into `PATH`:
 
 ```sh
-cargo install pova
+nix run github:chrollo-03/pova
+# or install into your profile:
+nix profile install github:chrollo-03/pova
 ```
 
-Or build straight from GitHub:
+### From source
+
+Needs a Rust toolchain (1.90+) from <https://rustup.rs>:
 
 ```sh
-cargo install --git https://github.com/P0r0ro/pova --tag v1.2.2
+cargo install --git https://github.com/chrollo-03/pova --tag v1.3.0
 ```
 
 ### The helpers pova needs
@@ -230,7 +243,7 @@ This needs you to sign in once (next section).
 - **Four visualizer modes** (`v`): stereo bars, mirror, mono and a waveform.
 - **Every btop theme** (`t`): pova reads btop's `.theme` files as they are, with a live preview. The four Catppuccin flavours are built in.
 - **The Esc menu**: btop-style, with the pova logo drawn in block characters, for themes, the visualizer, autoplay and album art.
-- **Your library** (`b`): your playlists, liked songs and history once you're signed in.
+- **Your library** (`b`): your playlists, liked songs and history once you're signed in, with Brand Account support and an explicit account switcher (`u`).
 - **Your playlists** (`p`): add the song you're on to one of your playlists or a new one, take songs out with `d`, and delete a playlist with `D` (it asks first).
 - **Even loudness**: every song plays at about the same volume, so a quiet acoustic track doesn't follow a loud one at half the level. On by default; switch it in the `esc` menu.
 - **Song-change notifications**: a desktop popup with the cover art when the song changes. Off by default; turn it on in the `esc` menu.

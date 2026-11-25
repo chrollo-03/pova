@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Build pova's signed apt repository (served on GitHub Pages) from the .deb
-# files of published releases. Every release's .deb is the one CI already
-# built and tested, so apt users get the same binary as every other channel.
+# Build pova's signed multi-arch apt repository (served on GitHub Pages) from
+# the .deb files of published releases. Every release's .deb is the one CI
+# already built and tested, so apt users get the same binary as every other
+# channel.
 #
 #   scripts/apt-repo.sh fetch <deb-dir> [count]   download the .deb of the last
 #                                                 <count> releases (default 3),
@@ -13,14 +14,15 @@
 # `build` signs with the armored private key in $APT_SIGNING_KEY (optional
 # passphrase in $APT_SIGNING_PASSPHRASE). Without a key it makes a throwaway
 # one, for tests: never publish that. `fetch` needs gh, `test` docker (or
-# DOCKER=podman). Layout: dists/stable/main/binary-amd64, pool/main/p/pova,
+# DOCKER=podman). Layout: dists/stable/main/binary-<arch>, pool/main/p/pova/<arch>,
 # and the public key as pova.gpg / pova.asc.
 set -euo pipefail
 
 SUITE=stable
 COMPONENT=main
-ARCH=amd64
-URL=${APT_URL:-https://p0r0ro.github.io/pova/apt}
+REPO=${GITHUB_REPOSITORY:-chrollo-03/pova}
+OWNER=${REPO%%/*}
+URL=${APT_URL:-https://${OWNER}.github.io/pova/apt}
 
 die() { echo "apt-repo: $*" >&2; exit 1; }
 
@@ -28,13 +30,13 @@ fetch() {
   local dir=${1:?deb dir} count=${2:-3}
   mkdir -p "$dir"
   local tags
-  tags=$(gh release list --exclude-drafts --exclude-pre-releases --limit "$count" --json tagName -q '.[].tagName')
-  [ -n "$tags" ] || die "no published releases found"
+  tags=$(gh release list --repo "$REPO" --exclude-drafts --exclude-pre-releases --limit "$count" --json tagName -q '.[].tagName')
+  [ -n "$tags" ] || die "no published releases found in $REPO"
   for tag in $tags; do
     # A stalled download must not hang a CI job: time out and retry.
     local ok=
     for attempt in 1 2 3; do
-      if timeout 300 gh release download "$tag" -D "$dir" -p '*.deb' -p '*.deb.sha256' --clobber; then
+      if timeout 300 gh release download "$tag" --repo "$REPO" -D "$dir" -p '*.deb' -p '*.deb.sha256' --clobber; then
         ok=1
         break
       fi
@@ -64,18 +66,38 @@ build() {
   ls "$debs"/*.deb >/dev/null 2>&1 || die "no .deb files in $debs"
   command -v apt-ftparchive >/dev/null || die "needs apt-ftparchive (apt-utils)"
   rm -rf "$site"
-  local pool="$site/pool/$COMPONENT/p/pova" bin="$site/dists/$SUITE/$COMPONENT/binary-$ARCH"
-  mkdir -p "$pool" "$bin"
-  cp "$debs"/*.deb "$pool/"
 
-  (cd "$site" && apt-ftparchive packages "pool" > "dists/$SUITE/$COMPONENT/binary-$ARCH/Packages")
-  gzip -9nk "$bin/Packages"
+  local arches=()
+  local f base arch
+  for f in "$debs"/*.deb; do
+    base=$(basename "$f" .deb)
+    arch=${base##*_}
+    [ -n "$arch" ] || die "couldn't detect arch from $f"
+    local pool="$site/pool/$COMPONENT/p/pova/$arch"
+    local bin="$site/dists/$SUITE/$COMPONENT/binary-$arch"
+    mkdir -p "$pool" "$bin"
+    cp "$f" "$pool/"
+    if [[ ! " ${arches[*]} " == *" $arch "* ]]; then
+      arches+=("$arch")
+    fi
+  done
+
+  IFS=$'\n' arches=($(printf '%s\n' "${arches[@]}" | sort))
+  unset IFS
+
+  for arch in "${arches[@]}"; do
+    local bin="$site/dists/$SUITE/$COMPONENT/binary-$arch"
+    (cd "$site" && apt-ftparchive packages "pool/$COMPONENT/p/pova/$arch" > "dists/$SUITE/$COMPONENT/binary-$arch/Packages")
+    gzip -9nk "$bin/Packages"
+  done
+
+  local arch_list="${arches[*]}"
   apt-ftparchive \
     -o APT::FTPArchive::Release::Origin=pova \
     -o APT::FTPArchive::Release::Label=pova \
     -o APT::FTPArchive::Release::Suite=$SUITE \
     -o APT::FTPArchive::Release::Codename=$SUITE \
-    -o APT::FTPArchive::Release::Architectures=$ARCH \
+    -o "APT::FTPArchive::Release::Architectures=$arch_list" \
     -o APT::FTPArchive::Release::Components=$COMPONENT \
     -o APT::FTPArchive::Release::Description="pova, YouTube Music in the terminal" \
     release "$site/dists/$SUITE" > "$site/dists/$SUITE/Release.tmp"
@@ -96,21 +118,21 @@ build() {
   gpg --batch --armor --export "$fpr" > "$site/pova.asc"
 
   local latest
-  latest=$(ls "$pool" | sort -V | tail -1)
+  latest=$(find "$site/pool" -name '*.deb' -printf '%f\n' | sort -V | tail -1)
   cat > "$site/index.html" <<EOF
 <!doctype html>
 <meta charset="utf-8">
 <title>pova apt repository</title>
 <h1>pova apt repository</h1>
-<p>For Debian, Ubuntu, Linux Mint, Pop!_OS and other apt-based distros:</p>
+<p>For Debian, Ubuntu, Linux Mint, Pop!_OS and other apt-based distros (${arch_list}):</p>
 <pre>sudo install -d -m 0755 /etc/apt/keyrings
 curl -fsSL $URL/pova.gpg | sudo tee /etc/apt/keyrings/pova.gpg &gt; /dev/null
 echo "deb [signed-by=/etc/apt/keyrings/pova.gpg] $URL $SUITE $COMPONENT" | sudo tee /etc/apt/sources.list.d/pova.list
 sudo apt update &amp;&amp; sudo apt install pova</pre>
 <p>Latest: $latest. Signing key fingerprint: <code>$fpr</code></p>
-<p><a href="https://github.com/P0r0ro/pova">github.com/P0r0ro/pova</a></p>
+<p><a href="https://github.com/$REPO">github.com/$REPO</a></p>
 EOF
-  echo "built $site: $(ls "$pool" | tr '\n' ' ')(key $fpr)"
+  echo "built $site ($arch_list): $(find "$site/pool" -name '*.deb' -printf '%f ')(key $fpr)"
 }
 
 # Serve <site> over HTTP and install pova from it on <image>, the way a user
@@ -148,5 +170,5 @@ case "${1:-}" in
   fetch) shift; fetch "$@" ;;
   build) shift; build "$@" ;;
   test) shift; test_repo "$@" ;;
-  *) sed -n '2,17p' "$0"; exit 1 ;;
+  *) sed -n '2,18p' "$0"; exit 1 ;;
 esac

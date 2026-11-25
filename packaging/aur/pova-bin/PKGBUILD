@@ -1,10 +1,10 @@
-# Maintainer: P0r0ro <250746769+P0r0ro@users.noreply.github.com>
+# Maintainer: chrollo-03 <chrollo-03@users.noreply.github.com>
 pkgname=pova-bin
-pkgver=1.2.2
+pkgver=1.3.0
 pkgrel=1
 pkgdesc="YouTube Music in the terminal, with a cava visualizer and btop themes"
 arch=('x86_64')
-url="https://github.com/P0r0ro/pova"
+url="https://github.com/chrollo-03/pova"
 license=('MIT')
 # pipewire-audio provides pw-record (pw-dump comes with pipewire, its dependency).
 depends=('mpv' 'yt-dlp' 'pipewire-audio' 'glibc' 'gcc-libs')
@@ -21,10 +21,10 @@ conflicts=('pova')
 options=('!debug')
 source=(
   "pova-v${pkgver}-x86_64-linux.tar.gz::${url}/releases/download/v${pkgver}/pova-v${pkgver}-x86_64-linux.tar.gz"
-  "pova-${pkgver}.desktop::https://raw.githubusercontent.com/P0r0ro/pova/v${pkgver}/packaging/appimage/pova.desktop"
-  "pova-${pkgver}.png::https://raw.githubusercontent.com/P0r0ro/pova/v${pkgver}/packaging/appimage/pova.png"
+  "pova-${pkgver}.desktop::https://raw.githubusercontent.com/chrollo-03/pova/v${pkgver}/packaging/appimage/pova.desktop"
+  "pova-${pkgver}.png::https://raw.githubusercontent.com/chrollo-03/pova/v${pkgver}/packaging/appimage/pova.png"
 )
-sha256sums=('64dc9f5e225d80ba32ab7bc6b228f04aa5cc41ea39a76711230b56a1570e8a2e'
+sha256sums=('SKIP'
             '77e8a633ec7a257a0431f1ff2b9f649871616ba0b2cf336fafa8a340bbb569de'
             '4ce91bc0440e985c495f5c6bd57202cb0070ac2563d6ec84b7bf6aea89234d14')
 

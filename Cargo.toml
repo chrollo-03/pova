@@ -1,12 +1,12 @@
 [package]
 name = "pova"
-version = "1.2.2"
+version = "1.3.0"
 edition = "2024"
 # Oldest Rust that builds pova (checked in CI by the msrv job).
 rust-version = "1.90"
 description = "btop-style YouTube Music player with a built-in cava visualizer"
 license = "MIT"
-repository = "https://github.com/P0r0ro/pova"
+repository = "https://github.com/chrollo-03/pova"
 readme = "README.md"
 keywords = ["youtube-music", "tui", "visualizer", "cava", "btop"]
 categories = ["multimedia::audio", "command-line-utilities"]
@@ -51,8 +51,8 @@ ytmapi-rs = { version = "0.3.4", default-features = false, features = ["rustls",
 # ── Linux packages (built in CI by .github/workflows/release.yml) ──
 # Debian/Ubuntu: cargo deb
 [package.metadata.deb]
-maintainer = "P0r0ro <250746769+P0r0ro@users.noreply.github.com>"
-copyright = "2026, P0r0ro"
+maintainer = "chrollo-03 <chrollo-03@users.noreply.github.com>"
+copyright = "2026, P0r0ro and contributors"
 license-file = ["LICENSE", "0"]
 section = "sound"
 priority = "optional"
