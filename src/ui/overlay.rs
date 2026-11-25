@@ -223,6 +223,43 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let table = Table::new(rows, [Constraint::Fill(1), Constraint::Length(20)]).row_highlight_style(sel);
             f.render_stateful_widget(table, body, state);
         }
+        Overlay::Accounts { items, state } => {
+            let rows_n = items.as_ref().map_or(1, |v| v.len().max(1)) as u16;
+            let h = (rows_n + 4).min(area.height.saturating_sub(2)).max(6);
+            let r = centered(area, 60, h);
+            f.render_widget(Clear, r);
+            let block = frame(&t, "switch YouTube account").title_bottom(
+                Line::from(Span::styled("┐enter switch · esc close┌", Style::new().fg(t.inactive_fg)))
+                    .alignment(Alignment::Right),
+            );
+            let inner = block.inner(r);
+            f.render_widget(block, r);
+            let inner = Rect {
+                x: inner.x + 1,
+                width: inner.width.saturating_sub(2),
+                ..inner
+            };
+            let rows: Vec<Row> = match items {
+                None => vec![Row::new(vec![
+                    Cell::from("loading your YouTube accounts & channels…").style(Style::new().fg(t.inactive_fg)),
+                ])],
+                Some(list) if list.is_empty() => vec![Row::new(vec![
+                    Cell::from("no accounts found").style(Style::new().fg(t.inactive_fg)),
+                ])],
+                Some(list) => list
+                    .iter()
+                    .map(|a| {
+                        let mark = if a.active { "● " } else { "  " };
+                        Row::new(vec![
+                            Cell::from(format!("{mark}{}", a.name)),
+                            Cell::from(a.subtitle.as_str()).style(Style::new().fg(t.inactive_fg)),
+                        ])
+                    })
+                    .collect(),
+            };
+            let table = Table::new(rows, [Constraint::Fill(1), Constraint::Length(24)]).row_highlight_style(sel);
+            f.render_stateful_widget(table, inner, state);
+        }
     }
 }
 

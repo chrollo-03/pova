@@ -257,7 +257,7 @@ pub fn up_next(app: &App) -> Option<String> {
 }
 
 /// Cut `s` to `max` terminal columns, ending in "…" when shortened.
-fn ellipsize(s: &str, max: usize) -> String {
+pub(crate) fn ellipsize(s: &str, max: usize) -> String {
     if Span::raw(s).width() <= max {
         return s.to_string();
     }
@@ -467,6 +467,9 @@ fn browse(f: &mut Frame, app: &mut App, area: Rect, library: bool) {
     if depth > 1 {
         spans.push(Span::styled(format!("  ‹{back} back›"), Style::new().fg(t.inactive_fg)));
     }
+    if library {
+        spans.push(Span::styled("  ‹u account›", Style::new().fg(t.inactive_fg)));
+    }
     f.render_widget(Paragraph::new(Line::from(spans)), crumb);
 
     if let Some(err) = &lv.error {
@@ -481,6 +484,19 @@ fn browse(f: &mut Frame, app: &mut App, area: Rect, library: bool) {
     }
     if lv.loading && lv.items.is_empty() {
         centered_msg(f, body, &t, vec![Line::from(format!("{} loading…", spinner()))]);
+        return;
+    }
+    if library && lv.items.is_empty() {
+        centered_msg(
+            f,
+            body,
+            &t,
+            vec![
+                Line::from("nothing here yet"),
+                Line::from(""),
+                Line::from("on a YouTube Brand Account? press u to switch account"),
+            ],
+        );
         return;
     }
     let rows = item_rows(&t, &lv.items, playing.as_deref(), likes);

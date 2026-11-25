@@ -328,7 +328,11 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let login = if app.logged_in {
-        Span::styled("● signed in", Style::new().fg(t.accent))
+        let label = match app.account.as_ref().and_then(|a| a.name.as_deref()) {
+            Some(name) => format!("● {}", tabs::ellipsize(name, 20)),
+            None => "● signed in".into(),
+        };
+        Span::styled(label, Style::new().fg(t.accent))
     } else {
         Span::styled("○ signed out", Style::new().fg(t.inactive_fg))
     };

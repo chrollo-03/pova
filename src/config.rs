@@ -237,6 +237,15 @@ impl Session {
     }
 }
 
+/// Explicitly chosen YouTube account slot (`authuser`) and optional Brand
+/// Account (`page_id`), remembered between runs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountChoice {
+    pub auth_user: String,
+    pub page_id: Option<String>,
+    pub name: Option<String>,
+}
+
 /// UI state remembered between runs.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -251,6 +260,7 @@ pub struct State {
     pub album_art: Option<bool>,
     pub normalize_loudness: Option<bool>,
     pub notifications: Option<bool>,
+    pub account: Option<AccountChoice>,
 }
 
 impl State {

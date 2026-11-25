@@ -86,6 +86,68 @@ pub async fn playlist_tracks<A: AuthToken>(
     Ok(tracks)
 }
 
+/// Every track of playlist `browse_id` (the "VL…" form) fetched through
+/// [`crate::innertube::Authed`] so Brand Account delegation (`onBehalfOfUser`)
+/// and `X-Goog-AuthUser` / `X-Goog-PageId` headers apply to every page.
+pub async fn playlist_tracks_authed(
+    yt: &crate::innertube::Authed,
+    browse_id: &str,
+    max_pages: usize,
+) -> anyhow::Result<Vec<Track>> {
+    let mut tracks = Vec::new();
+    let mut continuation: Option<String> = None;
+    for page in 0..max_pages {
+        let (body, params) = match continuation.take() {
+            Some(c) => (
+                serde_json::Map::from_iter([("continuation".to_string(), Value::String(c.clone()))]),
+                vec![
+                    ("ctoken".to_string(), c.clone()),
+                    ("continuation".to_string(), c),
+                    ("type".to_string(), "next".to_string()),
+                ],
+            ),
+            None => (
+                serde_json::Map::from_iter([("browseId".to_string(), Value::String(browse_id.to_string()))]),
+                Vec::new(),
+            ),
+        };
+        let raw = match fetch_authed(yt, body, params).await {
+            Ok(raw) => raw,
+            Err(e) if page == 0 => return Err(e.into()),
+            Err(e) => {
+                tracing::warn!("playlist {browse_id}: stopping after {page} pages: {e}");
+                break;
+            }
+        };
+        let json: Value = serde_json::from_str(&raw)?;
+        let (items, next) = page_items(&json);
+        tracks.extend(items);
+        match next {
+            Some(token) => continuation = Some(token),
+            None => break,
+        }
+    }
+    Ok(tracks)
+}
+
+async fn fetch_authed(
+    yt: &crate::innertube::Authed,
+    body: serde_json::Map<String, Value>,
+    params: Vec<(String, String)>,
+) -> ytmapi_rs::Result<String> {
+    let mut attempt = 1;
+    loop {
+        match yt.post_raw("browse", body.clone(), params.clone()).await {
+            Err(e) if attempt < 3 => {
+                tracing::debug!("playlist page: attempt {attempt} failed, retrying: {e}");
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(500 * attempt)).await;
+            }
+            res => return res,
+        }
+    }
+}
+
 /// One page, tried up to 3 times: on a slow connection a long page's
 /// response sometimes arrives cut off, which a second try fixes.
 async fn fetch<A: AuthToken>(yt: &YtMusic<A>, query: &BrowsePage) -> ytmapi_rs::Result<String> {
@@ -103,7 +165,7 @@ async fn fetch<A: AuthToken>(yt: &YtMusic<A>, query: &BrowsePage) -> ytmapi_rs::
 }
 
 /// The tracks on one page and the token for the next page, if any.
-fn page_items(json: &Value) -> (Vec<Track>, Option<String>) {
+pub(crate) fn page_items(json: &Value) -> (Vec<Track>, Option<String>) {
     let list = json
         .pointer("/onResponseReceivedActions/0/appendContinuationItemsAction/continuationItems")
         .or_else(|| find_key(json, "musicPlaylistShelfRenderer").and_then(|s| s.get("contents")))
