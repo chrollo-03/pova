@@ -15,6 +15,15 @@ keyboard shortcut, a script or a status bar. Run `pova` followed by a command:
 | `pova add <song>` | search and add the top result to the end of the queue |
 | `pova play-next <song>` | search and play the top result after the current song |
 | `pova play-now <song>` | search and play the top result right away |
+| `pova open <url>` | open a YouTube Music, YouTube, Spotify, Tidal, or `song.link` URL |
+| `pova sleep 30`, `pova sleep track`, `pova sleep +5`, `pova sleep off` | set, adjust, query, or cancel the sleep timer |
+| `pova speed 1.25`, `pova speed +`, `pova speed -` | set or step playback speed |
+| `pova eq bass`, `pova eq flat`, `pova eq off` | apply an equalizer preset or turn EQ off/on |
+| `pova quality max`, `pova quality low` | switch audio quality tier (`max`, `high`, `normal`, `low`) |
+| `pova ab-loop` | set point A, set point B, or clear A-B section loop |
+| `pova stats` | print your local listening stats summary (plays, hours, streak, top artist/track) |
+| `pova offline` | save or remove the playing track in the local offline cache |
+| `pova discord on`, `pova discord off`, `pova discord toggle` | control Discord Rich Presence |
 | `pova status` | print what's playing (see below) |
 
 The search commands take plain words, no quotes needed:
@@ -60,7 +69,9 @@ pova status -f '{state}: {artist} - {title} ({position}/{duration}) {liked}'
 ```
 
 Placeholders: `{title}` `{artist}` `{album}` `{state}` (playing or paused)
-`{position}` `{duration}` `{volume}` `{liked}` (♥ or nothing).
+`{position}` `{duration}` `{volume}` `{liked}` (♥ or nothing)
+`{sleep}` (countdown or `end of track`) `{quality}` (e.g. `MAX · OPUS 48kHz · 158k`)
+`{speed}` (e.g. `1.0x`) `{eq}` (active preset or `off`).
 
 **waybar** (`~/.config/waybar/config`):
 

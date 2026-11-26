@@ -69,6 +69,15 @@ actions! {
     ClearQueue => "clear_queue", "Clear queue (keeps current)";
     Refresh => "refresh", "Reload current view";
     JumpToCurrent => "jump_current", "Jump to playing track";
+    SleepTimer => "sleep_timer", "Sleep timer (countdown / end of track)";
+    Interlink => "interlink", "Interlink: artist, album, links & signal path";
+    Equalizer => "equalizer", "10-band equalizer & audio presets";
+    AbLoop => "ab_loop", "Set / clear A-B section loop";
+    CopyLink => "copy_link", "Copy universal interlink (song.link)";
+    SpeedUp => "speed_up", "Playback speed faster";
+    SpeedDown => "speed_down", "Playback speed slower";
+    Stats => "stats", "Listening stats (Wrapped Mini)";
+    SaveOffline => "save_offline", "Save / remove track for offline playback";
 }
 
 /// A normalised key: for printable characters SHIFT is folded into the char.
@@ -249,6 +258,15 @@ fn defaults() -> Vec<(Action, &'static [&'static str])> {
         (ClearQueue, &["C"]),
         (Refresh, &["F5", "ctrl+r"]),
         (JumpToCurrent, &["c"]),
+        (SleepTimer, &["z"]),
+        (Interlink, &["i"]),
+        (Equalizer, &["e"]),
+        (AbLoop, &["B"]),
+        (CopyLink, &["y"]),
+        (SpeedUp, &[")"]),
+        (SpeedDown, &["("]),
+        (Stats, &["W"]),
+        (SaveOffline, &["O"]),
     ]
 }
 

@@ -28,6 +28,7 @@ const DEFAULT_LIFETIME: Duration = Duration::from_secs(4 * 60 * 60);
 #[derive(Debug)]
 pub struct ResolveReq {
     pub video_id: String,
+    pub format: String,
 }
 
 #[derive(Debug)]
@@ -49,7 +50,7 @@ pub async fn run(mut reqs: UnboundedReceiver<ResolveReq>, events: UnboundedSende
         tokio::spawn(async move {
             let _permit = slots.acquire().await;
             let started = std::time::Instant::now();
-            let stream = match resolve(&req.video_id, node_runtime).await {
+            let stream = match resolve(&req.video_id, &req.format, node_runtime).await {
                 Ok(url) => {
                     tracing::debug!("resolved {} in {:.1}s", req.video_id, started.elapsed().as_secs_f32());
                     let deadline = expiry(&url, SystemTime::now());
@@ -69,9 +70,9 @@ pub async fn run(mut reqs: UnboundedReceiver<ResolveReq>, events: UnboundedSende
     }
 }
 
-async fn resolve(video_id: &str, node_runtime: bool) -> anyhow::Result<String> {
+async fn resolve(video_id: &str, format: &str, node_runtime: bool) -> anyhow::Result<String> {
     let mut cmd = Command::new("yt-dlp");
-    cmd.args(["-q", "--no-warnings", "--no-playlist", "-f", "bestaudio/best", "-g"]);
+    cmd.args(["-q", "--no-warnings", "--no-playlist", "-f", format, "-g"]);
     if node_runtime {
         cmd.args(["--js-runtimes", "node"]);
     }

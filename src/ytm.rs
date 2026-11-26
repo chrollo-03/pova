@@ -55,6 +55,7 @@ pub enum View {
     LibraryPlaylists,
     LikedSongs,
     History,
+    Offline,
 }
 
 #[derive(Debug)]
@@ -129,6 +130,24 @@ pub enum YtmReq {
         auth_user: String,
         page_id: Option<String>,
         name: String,
+    },
+    /// Resolve an external YouTube / YouTube Music / Spotify / Tidal / song.link URL.
+    ResolveLink {
+        link: crate::interlink::ExternalLink,
+    },
+}
+
+/// Resolved destination of an external interlink URL.
+#[derive(Debug)]
+pub enum LinkAction {
+    PlayTrack {
+        track: Track,
+        start_secs: Option<f64>,
+    },
+    OpenView(View),
+    SearchAndPlay {
+        query: String,
+        filter: SearchFilter,
     },
 }
 
@@ -211,6 +230,10 @@ pub enum YtmEvent {
         auth_user: String,
         page_id: Option<String>,
         name: String,
+    },
+    /// External interlink (YouTube / Spotify / Tidal / song.link) resolved.
+    LinkResolved {
+        action: LinkAction,
     },
 }
 
@@ -945,6 +968,7 @@ async fn handle(client: &Client, req: YtmReq) -> (YtmEvent, bool) {
                             video_id: t.video_id.get_raw().to_string(),
                             title: t.title,
                             artists: t.author,
+                            artist_id: None,
                             album: None,
                             album_id: None,
                             duration: parse_duration(&t.duration),
@@ -960,6 +984,13 @@ async fn handle(client: &Client, req: YtmReq) -> (YtmEvent, bool) {
                 },
             }
         }
+        YtmReq::ResolveLink { link } => match resolve_external_link(client, link).await {
+            Ok(action) => YtmEvent::LinkResolved { action },
+            Err(e) => YtmEvent::Failed {
+                token: None,
+                message: fail("Couldn't open link", &e),
+            },
+        },
         YtmReq::Rate { video_id, liked } => {
             let Client::Auth(yt) = client else {
                 let ev = YtmEvent::Failed {
@@ -1270,6 +1301,7 @@ async fn load(client: &Client, view: &View) -> anyhow::Result<(String, Vec<Item>
                 .map(|a| a.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
+            let artist_id = first_artist_id(&album.artists);
             let thumb = best_thumb(&album.thumbnails);
             let items = album
                 .tracks
@@ -1279,6 +1311,7 @@ async fn load(client: &Client, view: &View) -> anyhow::Result<(String, Vec<Item>
                         video_id: s.video_id.get_raw().to_string(),
                         title: s.title,
                         artists: artists.clone(),
+                        artist_id: artist_id.clone(),
                         album: Some(album.title.clone()),
                         album_id: Some(id.clone()),
                         duration: parse_duration(&s.duration),
@@ -1300,6 +1333,7 @@ async fn load(client: &Client, view: &View) -> anyhow::Result<(String, Vec<Item>
                         video_id: s.video_id.get_raw().to_string(),
                         title: s.title,
                         artists: join_artists(&s.artists),
+                        artist_id: first_artist_id(&s.artists).or_else(|| Some(id.clone())),
                         album: Some(s.album.name.clone()),
                         album_id: Some(s.album.id.get_raw().to_string()),
                         duration: None,
@@ -1355,6 +1389,7 @@ async fn load(client: &Client, view: &View) -> anyhow::Result<(String, Vec<Item>
                             video_id: s.video_id.get_raw().to_string(),
                             title: s.title,
                             artists: join_artists(&s.artists),
+                            artist_id: first_artist_id(&s.artists),
                             album: Some(s.album.name.clone()),
                             album_id: Some(s.album.id.get_raw().to_string()),
                             duration: parse_duration(&s.duration),
@@ -1365,6 +1400,7 @@ async fn load(client: &Client, view: &View) -> anyhow::Result<(String, Vec<Item>
                             video_id: v.video_id.get_raw().to_string(),
                             title: v.title,
                             artists: v.channel_name,
+                            artist_id: None,
                             album: None,
                             album_id: None,
                             duration: parse_duration(&v.duration),
@@ -1378,6 +1414,7 @@ async fn load(client: &Client, view: &View) -> anyhow::Result<(String, Vec<Item>
             tracing::info!("loaded {} history items", items.len());
             ("History".into(), items)
         }
+        View::Offline => ("Offline".into(), Vec::new()),
     })
 }
 
@@ -1676,6 +1713,7 @@ fn playlist_item(item: PlaylistItem) -> Option<Track> {
             video_id: s.video_id.get_raw().to_string(),
             title: s.title,
             artists: join_artists(&s.artists),
+            artist_id: first_artist_id(&s.artists),
             album: Some(s.album.name.clone()),
             album_id: Some(s.album.id.get_raw().to_string()),
             duration: parse_duration(&s.duration),
@@ -1686,6 +1724,7 @@ fn playlist_item(item: PlaylistItem) -> Option<Track> {
             video_id: v.video_id.get_raw().to_string(),
             title: v.title,
             artists: v.channel_name,
+            artist_id: None,
             album: None,
             album_id: None,
             duration: parse_duration(&v.duration),
@@ -1753,6 +1792,7 @@ async fn search(client: &Client, filter: SearchFilter, query: &str) -> anyhow::R
                     video_id: s.video_id.get_raw().to_string(),
                     title: s.title,
                     artists: s.artist,
+                    artist_id: None,
                     album: s.album.as_ref().map(|a| a.name.clone()),
                     album_id: s.album.as_ref().map(|a| a.id.get_raw().to_string()),
                     duration: parse_duration(&s.duration),
@@ -1775,6 +1815,7 @@ async fn search(client: &Client, filter: SearchFilter, query: &str) -> anyhow::R
                     video_id: video_id.get_raw().to_string(),
                     title,
                     artists: channel_name,
+                    artist_id: None,
                     album: None,
                     album_id: None,
                     duration: parse_duration(&length),
@@ -1829,6 +1870,82 @@ fn best_thumb(thumbs: &[Thumbnail]) -> Option<String> {
 
 fn join_artists(a: &[ytmapi_rs::parse::ParsedSongArtist]) -> String {
     a.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")
+}
+
+fn first_artist_id(a: &[ytmapi_rs::parse::ParsedSongArtist]) -> Option<String> {
+    a.iter()
+        .find_map(|x| x.id.as_ref().map(|id| id.get_raw().to_string()))
+}
+
+async fn resolve_external_link(client: &Client, link: crate::interlink::ExternalLink) -> anyhow::Result<LinkAction> {
+    use crate::interlink::{ExternalLink, ResolvedLink};
+    match link {
+        ExternalLink::YouTubePlaylist { playlist_id } => Ok(LinkAction::OpenView(View::Playlist(playlist_id))),
+        ExternalLink::YouTubeAlbum { browse_id } => Ok(LinkAction::OpenView(View::Album(browse_id))),
+        ExternalLink::YouTubeArtist { browse_id } => Ok(LinkAction::OpenView(View::Artist(browse_id))),
+        ExternalLink::YouTubeTrack { video_id, start_secs } => {
+            let track = fetch_track_by_video_id(client, &video_id, None, None).await;
+            Ok(LinkAction::PlayTrack { track, start_secs })
+        }
+        ExternalLink::CrossPlatform { service, kind, url } => {
+            let http = reqwest::Client::builder()
+                .user_agent(concat!("pova/", env!("CARGO_PKG_VERSION"), " (terminal music player)"))
+                .timeout(std::time::Duration::from_secs(10))
+                .build()?;
+            match crate::interlink::resolve_cross_platform(&http, &url, service, kind).await? {
+                ResolvedLink::YouTubeVideo {
+                    video_id,
+                    title,
+                    artist,
+                } => {
+                    let track = fetch_track_by_video_id(client, &video_id, title, artist).await;
+                    Ok(LinkAction::PlayTrack {
+                        track,
+                        start_secs: None,
+                    })
+                }
+                ResolvedLink::Search { query, filter } => Ok(LinkAction::SearchAndPlay { query, filter }),
+            }
+        }
+    }
+}
+
+async fn fetch_track_by_video_id(
+    client: &Client,
+    video_id: &str,
+    fallback_title: Option<String>,
+    fallback_artist: Option<String>,
+) -> Track {
+    if let Ok(tracks) = with_yt!(
+        client,
+        yt => yt.get_watch_playlist_from_video_id(VideoID::from_raw(video_id.to_string())).await
+    ) && let Some(t) = tracks
+        .into_iter()
+        .find(|t| t.video_id.get_raw() == video_id)
+    {
+        return Track {
+            video_id: t.video_id.get_raw().to_string(),
+            title: t.title,
+            artists: t.author,
+            artist_id: None,
+            album: None,
+            album_id: None,
+            duration: parse_duration(&t.duration),
+            thumbnail: best_thumb(&t.thumbnails),
+            liked: None,
+        };
+    }
+    Track {
+        video_id: video_id.to_string(),
+        title: fallback_title.unwrap_or_else(|| video_id.to_string()),
+        artists: fallback_artist.unwrap_or_default(),
+        artist_id: None,
+        album: None,
+        album_id: None,
+        duration: None,
+        thumbnail: None,
+        liked: None,
+    }
 }
 
 fn like_flag(s: &LikeStatus) -> Option<bool> {

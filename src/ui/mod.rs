@@ -368,6 +368,21 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
             ),
             Span::styled("┌", Style::new().fg(border)),
         ]));
+    } else if let Some(sleep_txt) = app.sleep.badge(std::time::Instant::now()) {
+        let badge = vec![
+            Span::styled("─┐", Style::new().fg(border)),
+            Span::styled(
+                format!("☾ {sleep_txt}"),
+                Style::new().fg(t.hi_fg).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("┌", Style::new().fg(border)),
+        ];
+        let bw = spans_width(&badge);
+        if area.width > bw + right_w + 4 && area.height >= 2 {
+            app.hits
+                .add(Rect::new(area.x + 1, area.y + area.height - 1, bw, 1), Hit::SleepTimer);
+        }
+        block = block.title_bottom(Line::from(badge));
     }
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -519,15 +534,28 @@ fn draw_controls(f: &mut Frame, app: &mut App, area: Rect) {
             String::new()
         };
         let k = |a| app.keymap.hint(a);
-        let hints = format!(
-            "{time}   {} play  {}/{} track  {}/{} seek  {} help",
-            k(Action::PlayPause),
-            k(Action::Prev),
-            k(Action::Next),
-            k(Action::SeekBackward),
-            k(Action::SeekForward),
-            k(Action::Help)
-        );
+        let hints = if inner.width >= 66 {
+            format!(
+                "{time}  {} play  {}/{} track  {} sleep  {} link  {} eq  {} help",
+                k(Action::PlayPause),
+                k(Action::Prev),
+                k(Action::Next),
+                k(Action::SleepTimer),
+                k(Action::Interlink),
+                k(Action::Equalizer),
+                k(Action::Help)
+            )
+        } else {
+            format!(
+                "{time}   {} play  {}/{} track  {}/{} seek  {} help",
+                k(Action::PlayPause),
+                k(Action::Prev),
+                k(Action::Next),
+                k(Action::SeekBackward),
+                k(Action::SeekForward),
+                k(Action::Help)
+            )
+        };
         f.render_widget(
             Paragraph::new(hints)
                 .alignment(Alignment::Center)
@@ -583,8 +611,9 @@ mod tests {
             video_id: format!("vid{i}"),
             title: format!("A fairly long song title number {i} (feat. Somebody Else)"),
             artists: "Some Artist, Another Artist".into(),
+            artist_id: Some("UCartist1".into()),
             album: Some("An Album".into()),
-            album_id: None,
+            album_id: Some("MPREb_alb1".into()),
             duration: Some(200.0 + i as f64),
             thumbnail: None,
             liked: Some(i.is_multiple_of(2)),
@@ -616,6 +645,8 @@ mod tests {
                 art: a,
                 resolve: unbounded_channel().0,
                 notify: unbounded_channel().0,
+                discord: unbounded_channel().0,
+                offline: unbounded_channel().0,
             },
             None,
             None,
@@ -693,16 +724,39 @@ mod tests {
             app.show_viz = true;
             app.show_player = true;
             app.show_controls = true;
-            for overlay in 0..3 {
+            for overlay in 0..7 {
                 app.overlay = Some(match overlay {
                     0 => Overlay::Help { scroll: 5 },
                     1 => Overlay::Menu {
                         state: Default::default(),
                     },
-                    _ => Overlay::Themes {
+                    2 => Overlay::Themes {
                         names: vec![("Default".into(), None)],
                         state: Default::default(),
                         original: app.theme.clone(),
+                    },
+                    3 => Overlay::SleepTimer {
+                        state: Default::default(),
+                        custom: None,
+                    },
+                    4 => Overlay::Equalizer { band: 2 },
+                    5 => Overlay::Stats {
+                        tab: crate::app::StatsTab::TopTracks,
+                        state: Default::default(),
+                    },
+                    _ => Overlay::Interlink {
+                        track: track(3),
+                        is_current: true,
+                        actions: vec![
+                            crate::app::InterlinkAction::GoToArtist {
+                                name: "Some Artist".into(),
+                                artist_id: None,
+                            },
+                            crate::app::InterlinkAction::CopyUniversal {
+                                video_id: "vid3".into(),
+                            },
+                        ],
+                        state: Default::default(),
                     },
                 });
                 term.draw(|f| {

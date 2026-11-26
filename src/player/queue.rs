@@ -193,6 +193,14 @@ impl Queue {
         }
     }
 
+    /// Drop the songs after the current one, keeping what already played.
+    pub fn truncate_after_current(&mut self) {
+        match self.current {
+            Some(c) => self.entries.truncate(c + 1),
+            None => self.entries.clear(),
+        }
+    }
+
     fn shuffle_upcoming(&mut self) {
         let start = self.current.map_or(0, |c| c + 1);
         if start < self.len() {
@@ -223,6 +231,50 @@ impl Queue {
     pub fn contains(&self, video_id: &str) -> bool {
         self.entries.iter().any(|e| e.track.video_id == video_id)
     }
+
+    /// Total remaining seconds in the queue (including the rest of the current track).
+    pub fn remaining_duration(&self, current_pos: f64) -> f64 {
+        let Some(cur) = self.current else {
+            return self.entries.iter().filter_map(|e| e.track.duration).sum();
+        };
+        let cur_rem = self
+            .entries
+            .get(cur)
+            .and_then(|e| e.track.duration)
+            .map(|d| (d - current_pos).max(0.0))
+            .unwrap_or(0.0);
+        let upcoming: f64 = self
+            .entries
+            .iter()
+            .skip(cur + 1)
+            .filter_map(|e| e.track.duration)
+            .sum();
+        cur_rem + upcoming
+    }
+
+    /// Remove duplicate upcoming tracks (keeping the current track and first upcoming copy).
+    pub fn deduplicate_upcoming(&mut self) -> usize {
+        let start = self.current.map_or(0, |c| c + 1);
+        if start >= self.entries.len() {
+            return 0;
+        }
+        let mut seen = std::collections::HashSet::new();
+        if let Some(cur) = self.current_track() {
+            seen.insert(cur.video_id.clone());
+        }
+        let before = self.entries.len();
+        let mut idx = 0;
+        self.entries.retain(|e| {
+            let keep = if idx < start {
+                true
+            } else {
+                seen.insert(e.track.video_id.clone())
+            };
+            idx += 1;
+            keep
+        });
+        before - self.entries.len()
+    }
 }
 
 #[cfg(test)]
@@ -234,6 +286,7 @@ mod tests {
             video_id: id.into(),
             title: id.into(),
             artists: String::new(),
+            artist_id: None,
             album: None,
             album_id: None,
             duration: None,

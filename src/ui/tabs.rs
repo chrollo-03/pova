@@ -61,9 +61,9 @@ pub fn now_playing(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     };
 
-    // Text block below the art: title, artist, album, gap, progress, time,
+    // Text block below the art: title, artist, album, quality/badges, progress, time,
     // status, gap, up next.
-    let text_rows = 9u16;
+    let text_rows = 10u16;
     let art_rows = area.height.saturating_sub(text_rows + 1);
     // Terminal cells are ~2:1, so a square image is twice as wide as tall.
     let art_h = art_rows.min(area.width / 2);
@@ -131,11 +131,17 @@ pub fn now_playing(f: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(liked, Style::new().fg(t.hi_fg)),
         ])),
     );
+    if y < bottom && !track.artists.trim().is_empty() {
+        app.hits.add(line(y), Hit::NowPlayingArtist);
+    }
     put(
         f,
         &mut y,
         Paragraph::new(Span::styled(track.artists.clone(), Style::new().fg(t.main_fg))),
     );
+    if y < bottom && track.album.as_deref().is_some_and(|a| !a.trim().is_empty()) {
+        app.hits.add(line(y), Hit::NowPlayingAlbum);
+    }
     put(
         f,
         &mut y,
@@ -144,9 +150,85 @@ pub fn now_playing(f: &mut Frame, app: &mut App, area: Rect) {
             Style::new().fg(t.graph_text),
         )),
     );
+
+    // Tidal-style audio quality / signal path pill + live audio & sleep indicators.
+    if y < bottom {
+        let mut pills: Vec<(String, Style, Option<Hit>)> = Vec::new();
+        let quality_text = format!(" {} ", app.player.audio.badge(app.cfg.audio_quality));
+        let quality_style = match app.cfg.audio_quality {
+            crate::audio::AudioQuality::Max => Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
+            crate::audio::AudioQuality::High => Style::new().fg(t.hi_fg),
+            _ => Style::new().fg(t.graph_text),
+        };
+        pills.push((quality_text, quality_style, Some(Hit::AudioQuality)));
+        if app.is_offline_cached(&track.video_id) {
+            pills.push((
+                "⬇ offline".into(),
+                Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
+                None,
+            ));
+        } else if app.offline_pending.contains(&track.video_id) {
+            pills.push((
+                format!("{} saving", spinner()),
+                Style::new().fg(t.hi_fg),
+                None,
+            ));
+        }
+        if app.cfg.eq.is_active() {
+            pills.push((
+                format!("EQ {}", app.cfg.eq.preset.label()),
+                Style::new().fg(t.hi_fg),
+                Some(Hit::Action(Action::Equalizer)),
+            ));
+        }
+        if (app.cfg.playback_speed - 1.0).abs() >= 0.01 {
+            pills.push((
+                crate::audio::format_speed(app.cfg.playback_speed),
+                Style::new().fg(t.hi_fg),
+                None,
+            ));
+        }
+        if let Some(ab) = app.ab_loop.badge() {
+            pills.push((
+                ab,
+                Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
+                Some(Hit::Action(Action::AbLoop)),
+            ));
+        }
+        if let Some(sleep_txt) = app.sleep.badge(std::time::Instant::now()) {
+            pills.push((
+                format!("☾ {sleep_txt}"),
+                Style::new().fg(t.hi_fg).add_modifier(Modifier::BOLD),
+                Some(Hit::SleepTimer),
+            ));
+        }
+        let sep = " · ";
+        let total_w: u16 = pills
+            .iter()
+            .map(|(s, ..)| Span::raw(s.as_str()).width() as u16)
+            .sum::<u16>()
+            + (pills.len().saturating_sub(1) as u16) * (Span::raw(sep).width() as u16);
+        let mut px = area.x + area.width.saturating_sub(total_w) / 2;
+        let mut spans = Vec::new();
+        for (i, (text, style, hit)) in pills.into_iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(sep, Style::new().fg(t.inactive_fg)));
+                px += Span::raw(sep).width() as u16;
+            }
+            let w = Span::raw(text.as_str()).width() as u16;
+            if let Some(h) = hit
+                && px + w <= area.x + area.width
+            {
+                app.hits.add(Rect::new(px, y, w, 1), h);
+            }
+            px += w;
+            spans.push(Span::styled(text, style));
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)).alignment(Alignment::Center), line(y));
+    }
     y += 1;
 
-    // Progress bar (clickable).
+    // Progress bar (clickable, with A-B loop markers when active).
     if y < bottom {
         let w = area.width.saturating_sub(4);
         if w >= 2 {
@@ -155,8 +237,27 @@ pub fn now_playing(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 0.0
             };
+            let mut spans = progress_spans(&t, w, frac);
+            if app.player.duration > 0.0 {
+                let mark = |secs: f64| -> usize {
+                    ((secs / app.player.duration).clamp(0.0, 1.0) * (w - 1) as f64).round() as usize
+                };
+                match app.ab_loop {
+                    crate::audio::AbLoop::Off => {}
+                    crate::audio::AbLoop::PointA(a) => {
+                        let i = mark(a).min(spans.len() - 1);
+                        spans[i] = Span::styled("A", Style::new().fg(t.accent).add_modifier(Modifier::BOLD));
+                    }
+                    crate::audio::AbLoop::Active { a, b } => {
+                        let ia = mark(a).min(spans.len() - 1);
+                        let ib = mark(b).min(spans.len() - 1);
+                        spans[ia] = Span::styled("A", Style::new().fg(t.accent).add_modifier(Modifier::BOLD));
+                        spans[ib] = Span::styled("B", Style::new().fg(t.accent).add_modifier(Modifier::BOLD));
+                    }
+                }
+            }
             let r = Rect::new(area.x + 2, y, w, 1);
-            f.render_widget(Paragraph::new(Line::from(progress_spans(&t, w, frac))), r);
+            f.render_widget(Paragraph::new(Line::from(spans)), r);
             app.hits.add(r, Hit::Progress);
         }
     }
@@ -355,11 +456,42 @@ pub fn queue(f: &mut Frame, app: &mut App, area: Rect) {
         app.queue_state.select(cur);
     }
     let total = app.queue.len();
-    let body_h = area.height.saturating_sub(1) as usize;
-    let has_sb = total > body_h && area.width > 12;
+    let [summary_area, body_area] = if area.height >= 4 {
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area)
+    } else {
+        [Rect::new(area.x, area.y, area.width, 0), area]
+    };
+    if summary_area.height > 0 {
+        let rem = app.queue.remaining_duration(app.player.time);
+        let mut info = vec![Span::styled(
+            format!("{total} track{}", if total == 1 { "" } else { "s" }),
+            Style::new().fg(t.title).add_modifier(Modifier::BOLD),
+        )];
+        if rem > 0.0 {
+            info.push(Span::styled(
+                format!(" · {} remaining", format_time(rem)),
+                Style::new().fg(t.graph_text),
+            ));
+        }
+        if app.cfg.crossfade_secs > 0 {
+            info.push(Span::styled(
+                format!(" · fade {}s", app.cfg.crossfade_secs),
+                Style::new().fg(t.inactive_fg),
+            ));
+        }
+        if let Some(sleep_txt) = app.sleep.badge(std::time::Instant::now()) {
+            info.push(Span::styled(
+                format!(" · ☾ {sleep_txt}"),
+                Style::new().fg(t.hi_fg),
+            ));
+        }
+        f.render_widget(Paragraph::new(Line::from(info)), summary_area);
+    }
+    let body_h = body_area.height.saturating_sub(1) as usize;
+    let has_sb = total > body_h && body_area.width > 12;
     let table_area = Rect {
-        width: area.width.saturating_sub(u16::from(has_sb)),
-        ..area
+        width: body_area.width.saturating_sub(u16::from(has_sb)),
+        ..body_area
     };
     let (start, end) = window_bounds(total, body_h, &mut app.queue_state);
     let rows: Vec<Row> = app
@@ -385,10 +517,13 @@ pub fn queue(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 ""
             };
-            let heart = if crate::app::is_liked(&app.likes, tr) {
-                "♥"
-            } else {
-                ""
+            let heart = match (
+                crate::app::is_liked(&app.likes, tr),
+                app.is_offline_cached(&tr.video_id),
+            ) {
+                (true, _) => "♥",
+                (false, true) => "⬇",
+                (false, false) => "",
             };
             Row::new(vec![
                 Cell::from(marker),
@@ -421,18 +556,18 @@ pub fn queue(f: &mut Frame, app: &mut App, area: Rect) {
         .with_selected(app.queue_state.selected().and_then(|s| s.checked_sub(start)));
     f.render_stateful_widget(table, table_area, &mut view_state);
     let list_area = Rect {
-        y: area.y + 1,
-        height: area.height.saturating_sub(1),
+        y: body_area.y + 1,
+        height: body_area.height.saturating_sub(1),
         ..table_area
     };
     if has_sb {
         draw_scrollbar(
             f,
             Rect {
-                x: area.x + area.width - 1,
-                y: area.y + 1,
+                x: body_area.x + body_area.width - 1,
+                y: body_area.y + 1,
                 width: 1,
-                height: area.height.saturating_sub(1),
+                height: body_area.height.saturating_sub(1),
             },
             &t,
             total,
@@ -583,16 +718,20 @@ fn browse(f: &mut Frame, app: &mut App, area: Rect, library: bool) {
         return;
     }
     if library && lv.items.is_empty() {
-        centered_msg(
-            f,
-            body,
-            &t,
+        let lines = if lv.view == crate::ytm::View::Offline {
+            vec![
+                Line::from("no offline tracks saved yet"),
+                Line::from(""),
+                Line::from("press O on any playing or selected track to save it locally"),
+            ]
+        } else {
             vec![
                 Line::from("nothing here yet"),
                 Line::from(""),
                 Line::from("on a YouTube Brand Account? press u to switch account"),
-            ],
-        );
+            ]
+        };
+        centered_msg(f, body, &t, lines);
         if let Some(r) = acct_hit {
             app.hits.add(r, Hit::SwitchAccount);
         }
@@ -854,7 +993,7 @@ pub fn library(f: &mut Frame, app: &mut App, area: Rect) {
         Paragraph::new("─".repeat(gap.width as usize)).style(Style::new().fg(t.div_line)),
         gap,
     );
-    if !app.logged_in {
+    if !app.logged_in && app.library.section != LibSection::Offline {
         library_sign_in(f, app, body);
         return;
     }
@@ -1318,27 +1457,45 @@ pub fn lyrics(f: &mut Frame, app: &mut App, area: Rect) {
         } => {
             // Small lead so the highlight lands as the line is sung.
             let active = active_line(lines, app.player.time + 0.25);
+            let sel = app.lyrics_sel;
             let w = body.width.max(1) as usize;
             let rows_of = |s: &str| (Span::raw(s).width().max(1)).div_ceil(w) as u16;
             let mut text = Vec::with_capacity(lines.len());
-            let mut active_row = 0u16;
+            let mut row_spans: Vec<(usize, u16, u16)> = Vec::with_capacity(lines.len());
+            let mut focus_row = 0u16;
             let mut row = 0u16;
             for (i, (_, l)) in lines.iter().enumerate() {
                 let content = if l.is_empty() { "♪".to_string() } else { l.clone() };
-                let style = match active {
-                    Some(a) if a == i => {
-                        active_row = row;
-                        Style::new().fg(t.hi_fg).add_modifier(Modifier::BOLD)
+                let style = if sel == Some(i) {
+                    focus_row = row;
+                    Style::new()
+                        .bg(t.selected_bg)
+                        .fg(t.selected_fg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    match active {
+                        Some(a) if a == i => {
+                            if sel.is_none() {
+                                focus_row = row;
+                            }
+                            Style::new().fg(t.hi_fg).add_modifier(Modifier::BOLD)
+                        }
+                        Some(a) if i < a => Style::new().fg(t.inactive_fg),
+                        _ => Style::new().fg(t.main_fg),
                     }
-                    Some(a) if i < a => Style::new().fg(t.inactive_fg),
-                    _ => Style::new().fg(t.main_fg),
                 };
-                row += rows_of(&content);
+                let h = rows_of(&content);
+                row_spans.push((i, row, h));
+                row += h;
                 text.push(Line::styled(content, style));
             }
-            let auto = active_row.saturating_sub(body.height / 2);
+            let auto = focus_row.saturating_sub(body.height / 2);
             app.lyrics_auto = auto;
-            let scroll = app.lyrics_scroll.unwrap_or(auto);
+            let scroll = if sel.is_some() {
+                auto
+            } else {
+                app.lyrics_scroll.unwrap_or(auto)
+            };
             f.render_widget(
                 Paragraph::new(text)
                     .wrap(Wrap { trim: true })
@@ -1346,6 +1503,23 @@ pub fn lyrics(f: &mut Frame, app: &mut App, area: Rect) {
                     .scroll((scroll, 0)),
                 body,
             );
+            // Register click targets so clicking any synced lyric line seeks straight to it.
+            let view_end = scroll.saturating_add(body.height);
+            for (idx, r_start, r_h) in row_spans {
+                let r_end = r_start.saturating_add(r_h);
+                if r_end <= scroll || r_start >= view_end {
+                    continue;
+                }
+                let vis_top = r_start.max(scroll) - scroll;
+                let vis_bot = r_end.min(view_end) - scroll;
+                let h = vis_bot.saturating_sub(vis_top);
+                if h > 0 {
+                    app.hits.add(
+                        Rect::new(body.x, body.y + vis_top, body.width, h),
+                        Hit::LyricLine(idx),
+                    );
+                }
+            }
         }
     }
 }

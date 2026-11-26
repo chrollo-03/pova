@@ -5,6 +5,8 @@ pub struct Track {
     pub video_id: String,
     pub title: String,
     pub artists: String,
+    #[serde(default)]
+    pub artist_id: Option<String>,
     pub album: Option<String>,
     pub album_id: Option<String>,
     /// Seconds.

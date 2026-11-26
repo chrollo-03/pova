@@ -49,6 +49,14 @@ impl Paths {
     pub fn session_file(&self) -> PathBuf {
         self.state_dir.join("session.json")
     }
+    /// Local listening statistics (Wrapped Mini).
+    pub fn stats_file(&self) -> PathBuf {
+        self.state_dir.join("stats.json")
+    }
+    /// Saved offline audio tracks directory.
+    pub fn offline_dir(&self) -> PathBuf {
+        self.cache_dir.join("offline")
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +162,22 @@ pub struct Config {
     pub normalize_loudness: bool,
     /// Desktop notification with the cover art when the song changes.
     pub notifications: bool,
+    /// Show "Listening to..." status on Discord via local IPC socket.
+    pub discord_rpc: bool,
+    /// Optional custom Discord application ID for Rich Presence.
+    pub discord_app_id: String,
+    /// Tidal-style audio quality tier: "max" | "high" | "normal" | "low".
+    pub audio_quality: crate::audio::AudioQuality,
+    /// Smooth track transition fade in seconds (0 = off, up to 12).
+    pub crossfade_secs: u8,
+    /// Fade-out duration (seconds) when a sleep timer expires.
+    pub sleep_fade_secs: u64,
+    /// Playback speed multiplier (0.5..=2.0, default 1.0).
+    pub playback_speed: f64,
+    /// Preserve pitch when playback_speed != 1.0.
+    pub pitch_correction: bool,
+    /// 10-band graphic equalizer settings.
+    pub eq: crate::audio::EqSettings,
     /// Action name -> key(s), e.g. `next = ["N", "ctrl+right"]`.
     pub keys: HashMap<String, Vec<String>>,
     pub viz: VizConfig,
@@ -173,6 +197,14 @@ impl Default for Config {
             resume: true,
             normalize_loudness: true,
             notifications: false,
+            discord_rpc: false,
+            discord_app_id: String::new(),
+            audio_quality: crate::audio::AudioQuality::Max,
+            crossfade_secs: 0,
+            sleep_fade_secs: crate::sleep::DEFAULT_FADE_SECS,
+            playback_speed: 1.0,
+            pitch_correction: true,
+            eq: crate::audio::EqSettings::default(),
             keys: HashMap::new(),
             viz: VizConfig::default(),
         }
@@ -260,6 +292,12 @@ pub struct State {
     pub album_art: Option<bool>,
     pub normalize_loudness: Option<bool>,
     pub notifications: Option<bool>,
+    pub discord_rpc: Option<bool>,
+    pub audio_quality: Option<crate::audio::AudioQuality>,
+    pub crossfade_secs: Option<u8>,
+    pub playback_speed: Option<f64>,
+    pub pitch_correction: Option<bool>,
+    pub eq: Option<crate::audio::EqSettings>,
     pub account: Option<AccountChoice>,
 }
 
@@ -293,6 +331,7 @@ mod tests {
             video_id: "abc".into(),
             title: "Fine Again".into(),
             artists: "Seether".into(),
+            artist_id: None,
             album: None,
             album_id: None,
             duration: Some(243.0),

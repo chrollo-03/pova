@@ -226,13 +226,20 @@ fn track(item: &Value) -> Option<Track> {
         return None;
     }
     // Artists ("A, B & C") or the channel name; the separators are runs too.
-    let artists = column(item, 1)
+    let artist_runs = column(item, 1);
+    let artists = artist_runs
         .map(|runs| {
             runs.iter()
                 .filter_map(|r| r.get("text").and_then(Value::as_str))
                 .collect::<String>()
         })
         .unwrap_or_default();
+    let artist_id = artist_runs
+        .and_then(|runs| {
+            runs.iter()
+                .find_map(|r| str_at(r, "/navigationEndpoint/browseEndpoint/browseId"))
+        })
+        .map(str::to_string);
     let album_run = column(item, 2).and_then(|runs| runs.first());
     let album = album_run
         .and_then(|r| r.get("text").and_then(Value::as_str))
@@ -267,6 +274,7 @@ fn track(item: &Value) -> Option<Track> {
         video_id,
         title,
         artists,
+        artist_id,
         album,
         album_id,
         duration,

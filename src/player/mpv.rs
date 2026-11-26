@@ -30,6 +30,8 @@ pub enum PlayerCmd {
     /// Replace whatever is queued after the current file.
     SetNext(Option<String>),
     TogglePause,
+    /// Explicitly pause or unpause without toggling.
+    SetPause(bool),
     SeekRelative(f64),
     SeekAbsolute(f64),
     SetVolume(f64),
@@ -38,6 +40,14 @@ pub enum PlayerCmd {
     SetLoopFile(bool),
     /// Even out loudness between songs (adds / removes [`NORMALIZE_FILTER`]).
     SetNormalize(bool),
+    /// Apply or clear pova's labeled 10-band EQ filter (`@povaeq:...`).
+    SetEq(Option<String>),
+    /// Playback speed multiplier (0.25..=3.0).
+    SetSpeed(f64),
+    /// Keep original musical pitch when speed != 1.0.
+    SetPitchCorrection(bool),
+    /// Update `ytdl-format` for future tracks loaded via mpv's yt-dlp hook.
+    SetYtdlFormat(String),
     Stop,
     Quit,
 }
@@ -50,6 +60,11 @@ pub enum PlayerEvent {
     Paused(bool),
     Volume(f64),
     Muted(bool),
+    Speed(f64),
+    AudioCodec(Option<String>),
+    SampleRate(Option<u32>),
+    Channels(Option<u8>),
+    AudioBitrate(Option<u64>),
     /// The file mpv is currently playing changed.
     Path(Option<String>),
     /// mpv has nothing to play.
@@ -72,6 +87,14 @@ pub struct MpvConfig {
     pub client_name: String,
     /// Start with [`NORMALIZE_FILTER`] on.
     pub normalize: bool,
+    /// Initial `ytdl-format` selector (from [`crate::audio::AudioQuality`]).
+    pub ytdl_format: String,
+    /// Initial labeled EQ filter (`@povaeq:...`), if enabled.
+    pub eq_filter: Option<String>,
+    /// Initial playback speed (default 1.0).
+    pub speed: f64,
+    /// Keep original pitch when speed != 1.0.
+    pub pitch_correction: bool,
 }
 
 /// Label of pova's loudness filter in mpv's `af` chain, so it can be removed
@@ -96,6 +119,11 @@ const OBSERVED: &[&str] = &[
     "path",
     "idle-active",
     "paused-for-cache",
+    "speed",
+    "audio-codec-name",
+    "audio-params/samplerate",
+    "audio-params/channel-count",
+    "audio-bitrate",
 ];
 
 fn spawn_mpv(cfg: &MpvConfig) -> anyhow::Result<Child> {
@@ -113,10 +141,18 @@ fn spawn_mpv(cfg: &MpvConfig) -> anyhow::Result<Child> {
         .arg("--prefetch-playlist=yes")
         .arg("--gapless-audio=weak")
         .arg("--cache=yes")
-        .arg("--ytdl-format=bestaudio/best")
+        .arg(format!("--ytdl-format={}", cfg.ytdl_format))
+        .arg(format!("--speed={:.2}", cfg.speed.clamp(0.25, 3.0)))
+        .arg(format!(
+            "--audio-pitch-correction={}",
+            if cfg.pitch_correction { "yes" } else { "no" }
+        ))
         .arg("--keep-open=no");
     if cfg.normalize {
         cmd.arg(format!("--af-append={}", normalize_filter()));
+    }
+    if let Some(eq) = &cfg.eq_filter {
+        cmd.arg(format!("--af-append={eq}"));
     }
     // yt-dlp needs a JS runtime for YouTube's signature challenges; it only
     // enables deno by default, so point it at node when that is all we have.
@@ -248,6 +284,7 @@ async fn run_inner(
                         }
                     }
                     PlayerCmd::TogglePause => send(&mut write, json!(["cycle", "pause"])).await?,
+                    PlayerCmd::SetPause(p) => send(&mut write, json!(["set_property", "pause", p])).await?,
                     PlayerCmd::SeekRelative(s) => send(&mut write, json!(["seek", s, "relative"])).await?,
                     PlayerCmd::SeekAbsolute(s) => send(&mut write, json!(["seek", s, "absolute"])).await?,
                     PlayerCmd::SetVolume(v) => send(&mut write, json!(["set_property", "volume", v])).await?,
@@ -261,6 +298,25 @@ async fn run_inner(
                         } else {
                             send(&mut write, json!(["af", "remove", NORMALIZE_LABEL])).await?
                         }
+                    }
+                    PlayerCmd::SetEq(filter) => {
+                        let _ = send(&mut write, json!(["af", "remove", crate::audio::EQ_FILTER_LABEL])).await;
+                        if let Some(f) = filter {
+                            send(&mut write, json!(["af", "add", f])).await?;
+                        }
+                    }
+                    PlayerCmd::SetSpeed(s) => {
+                        send(&mut write, json!(["set_property", "speed", s.clamp(0.25, 3.0)])).await?
+                    }
+                    PlayerCmd::SetPitchCorrection(on) => {
+                        send(
+                            &mut write,
+                            json!(["set_property", "audio-pitch-correction", if on { "yes" } else { "no" }]),
+                        )
+                        .await?
+                    }
+                    PlayerCmd::SetYtdlFormat(fmt) => {
+                        send(&mut write, json!(["set_property", "ytdl-format", fmt])).await?
                     }
                     PlayerCmd::Stop => send(&mut write, json!(["stop"])).await?,
                     PlayerCmd::Quit => {
@@ -313,6 +369,19 @@ fn handle_line(line: &str, events: &UnboundedSender<PlayerEvent>) {
                 "path" => Some(PlayerEvent::Path(data.and_then(Value::as_str).map(str::to_string))),
                 "idle-active" => flag().map(PlayerEvent::Idle),
                 "paused-for-cache" => flag().map(PlayerEvent::Buffering),
+                "speed" => num().map(PlayerEvent::Speed),
+                "audio-codec-name" => Some(PlayerEvent::AudioCodec(
+                    data.and_then(Value::as_str).map(str::to_string),
+                )),
+                "audio-params/samplerate" => Some(PlayerEvent::SampleRate(
+                    num().filter(|&v| v > 0.0).map(|v| v.round() as u32),
+                )),
+                "audio-params/channel-count" => Some(PlayerEvent::Channels(
+                    num().filter(|&v| v > 0.0).map(|v| v.round() as u8),
+                )),
+                "audio-bitrate" => Some(PlayerEvent::AudioBitrate(
+                    num().filter(|&v| v > 0.0).map(|v| v.round() as u64),
+                )),
                 _ => None,
             }
         }

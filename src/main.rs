@@ -2,17 +2,23 @@
 
 mod app;
 mod art;
+mod audio;
 mod auth;
 mod config;
 mod control;
+mod discord;
 mod innertube;
+mod interlink;
 mod keymap;
 mod lenient;
 mod lyrics;
 mod model;
 mod notify;
+mod offline;
 mod player;
 mod resolve;
+mod sleep;
+mod stats;
 mod theme;
 mod ui;
 mod viz;
@@ -113,9 +119,44 @@ enum CliCommand {
         #[arg(required = true)]
         query: Vec<String>,
     },
+    /// Open a YouTube Music, YouTube, Spotify, Tidal, or song.link URL.
+    Open { url: String },
+    /// Sleep timer: 15, 30m, 1h, +5, -5, track (end of track), off, or status.
+    #[command(allow_hyphen_values = true)]
+    Sleep {
+        #[arg(default_value = "status")]
+        amount: String,
+    },
+    /// Playback speed: 0.5..2.0, +, -, or status.
+    #[command(allow_hyphen_values = true)]
+    Speed {
+        #[arg(default_value = "status")]
+        rate: String,
+    },
+    /// 10-band equalizer preset: off, on, flat, bass, vocal, rock, electronic, acoustic, pop, jazz, classical, treble, late_night, or status.
+    Eq {
+        #[arg(default_value = "status")]
+        preset: String,
+    },
+    /// Audio quality tier: max, high, normal, low, or status.
+    Quality {
+        #[arg(default_value = "status")]
+        tier: String,
+    },
+    /// Set / clear A-B section loop on the current track.
+    AbLoop,
+    /// Print your local listening stats summary (Wrapped Mini).
+    Stats,
+    /// Save or remove the currently playing track in the offline audio cache.
+    Offline,
+    /// Discord Rich Presence: on, off, toggle, or status.
+    Discord {
+        #[arg(default_value = "status")]
+        mode: String,
+    },
     /// Print what's playing, e.g. for a status bar.
     Status {
-        /// Placeholders: {title} {artist} {album} {state} {position} {duration} {volume} {liked}
+        /// Placeholders: {title} {artist} {album} {state} {position} {duration} {volume} {liked} {sleep} {quality} {speed} {eq}
         #[arg(short, long, default_value = control::STATUS_FORMAT)]
         format: String,
     },
@@ -138,6 +179,15 @@ impl CliCommand {
             CliCommand::Add { query } => C::Add(query.join(" ")),
             CliCommand::PlayNext { query } => C::PlayNext(query.join(" ")),
             CliCommand::PlayNow { query } => C::PlayNow(query.join(" ")),
+            CliCommand::Open { url } => C::Open(url),
+            CliCommand::Sleep { amount } => C::Sleep(amount),
+            CliCommand::Speed { rate } => C::Speed(rate),
+            CliCommand::Eq { preset } => C::Eq(preset),
+            CliCommand::Quality { tier } => C::Quality(tier),
+            CliCommand::AbLoop => C::AbLoop,
+            CliCommand::Stats => C::Stats,
+            CliCommand::Offline => C::Offline,
+            CliCommand::Discord { mode } => C::Discord(mode),
             CliCommand::Status { format } => C::Status(format),
         })
     }
@@ -360,12 +410,20 @@ async fn run(cli: Cli, cfg: Config, paths: Paths, state: State) -> anyhow::Resul
     // ── actors ──
     let (player_tx, player_cmd_rx) = unbounded_channel();
     let (player_ev_tx, mut player_rx) = unbounded_channel();
+    let effective_quality = state.audio_quality.unwrap_or(cfg.audio_quality);
+    let effective_eq = state.eq.as_ref().unwrap_or(&cfg.eq);
+    let effective_speed = state.playback_speed.unwrap_or(cfg.playback_speed);
+    let effective_pitch = state.pitch_correction.unwrap_or(cfg.pitch_correction);
     let mpv_cfg = MpvConfig {
         socket: paths.runtime_dir.join(format!("pova-{}.sock", std::process::id())),
         volume: state.volume.unwrap_or(cfg.volume).min(100),
         extra_args: cfg.mpv_args.clone(),
         client_name: client_name.clone(),
         normalize: state.normalize_loudness.unwrap_or(cfg.normalize_loudness),
+        ytdl_format: effective_quality.ytdl_format().to_string(),
+        eq_filter: effective_eq.mpv_filter(),
+        speed: effective_speed,
+        pitch_correction: effective_pitch,
     };
     let player_task = tokio::spawn(mpv::run(mpv_cfg, player_cmd_rx, player_ev_tx));
 
@@ -438,6 +496,18 @@ async fn run(cli: Cli, cfg: Config, paths: Paths, state: State) -> anyhow::Resul
         notify_rx,
     ));
 
+    let (discord_tx, discord_rx) = unbounded_channel();
+    let effective_discord = state.discord_rpc.unwrap_or(cfg.discord_rpc);
+    tokio::spawn(discord::run(
+        effective_discord,
+        cfg.discord_app_id.clone(),
+        discord_rx,
+    ));
+
+    let (offline_tx, offline_req_rx) = unbounded_channel();
+    let (offline_ev_tx, mut offline_rx) = unbounded_channel();
+    tokio::spawn(offline::run(paths.offline_dir(), offline_req_rx, offline_ev_tx));
+
     let channels = Channels {
         player: player_tx.clone(),
         ytm: ytm_tx,
@@ -445,6 +515,8 @@ async fn run(cli: Cli, cfg: Config, paths: Paths, state: State) -> anyhow::Resul
         art: art_tx,
         resolve: resolve_tx,
         notify: notify_tx,
+        discord: discord_tx.clone(),
+        offline: offline_tx,
     };
     let mut app = App::new(cfg, paths, state, keymap, channels, picker, art_proto);
     app.cat_art = cat_proto;
@@ -515,6 +587,7 @@ async fn run(cli: Cli, cfg: Config, paths: Paths, state: State) -> anyhow::Resul
                 Some(ev) = lyrics_rx.recv() => app.on_lyrics(ev),
                 Some(ev) = art_rx.recv() => app.on_art(ev),
                 Some(ev) = resolve_rx.recv() => app.on_resolved(ev),
+                Some(ev) = offline_rx.recv() => app.on_offline(ev),
                 Some(req) = control_rx.recv() => {
                     let answer = app.on_control(req.command);
                     let _ = req.reply.send(answer);
@@ -566,6 +639,8 @@ async fn run(cli: Cli, cfg: Config, paths: Paths, state: State) -> anyhow::Resul
     // ── teardown ──
     app.save_state();
     app.save_session();
+    app.save_stats();
+    let _ = discord_tx.send(discord::PresenceCmd::Clear);
     let _ = player_tx.send(PlayerCmd::Quit);
     let _ = tokio::time::timeout(Duration::from_secs(2), player_task).await;
     viz.shutdown();

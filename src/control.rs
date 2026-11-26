@@ -34,6 +34,24 @@ pub enum Command {
     PlayNext(String),
     /// Search and play the first song now.
     PlayNow(String),
+    /// Open a YouTube Music, YouTube, Spotify, Tidal, or song.link URL.
+    Open(String),
+    /// Sleep timer: "30", "track", "+5", "off", "status".
+    Sleep(String),
+    /// Playback speed: "1.25", "1.0", "+", "-", or "status".
+    Speed(String),
+    /// Equalizer preset: "bass", "vocal", "flat", "off", "on", or "status".
+    Eq(String),
+    /// Audio quality tier: "max", "high", "normal", "low", or "status".
+    Quality(String),
+    /// Toggle / clear A-B section loop.
+    AbLoop,
+    /// Print local listening stats summary (Wrapped Mini).
+    Stats,
+    /// Save or remove the current track in the offline cache.
+    Offline,
+    /// Discord Rich Presence: "on", "off", "toggle", or "status".
+    Discord(String),
     /// One line of text about what's playing, from a format string.
     Status(String),
 }
@@ -68,6 +86,15 @@ impl Command {
             "add" => Command::Add(need("a search query")?),
             "play-next" => Command::PlayNext(need("a search query")?),
             "play-now" => Command::PlayNow(need("a search query")?),
+            "open" => Command::Open(need("a YouTube, Spotify, Tidal, or song.link URL")?),
+            "sleep" => Command::Sleep(if arg.is_empty() { "status".into() } else { arg }),
+            "speed" => Command::Speed(if arg.is_empty() { "status".into() } else { arg }),
+            "eq" => Command::Eq(if arg.is_empty() { "status".into() } else { arg }),
+            "quality" => Command::Quality(if arg.is_empty() { "status".into() } else { arg }),
+            "ab-loop" => Command::AbLoop,
+            "stats" => Command::Stats,
+            "offline" => Command::Offline,
+            "discord" => Command::Discord(if arg.is_empty() { "status".into() } else { arg }),
             "status" => Command::Status(if arg.is_empty() { STATUS_FORMAT.into() } else { arg }),
             other => return Err(format!("unknown command `{other}`")),
         })
@@ -88,6 +115,15 @@ impl Command {
             Command::Add(q) => format!("add\t{q}"),
             Command::PlayNext(q) => format!("play-next\t{q}"),
             Command::PlayNow(q) => format!("play-now\t{q}"),
+            Command::Open(u) => format!("open\t{u}"),
+            Command::Sleep(s) => format!("sleep\t{s}"),
+            Command::Speed(s) => format!("speed\t{s}"),
+            Command::Eq(s) => format!("eq\t{s}"),
+            Command::Quality(s) => format!("quality\t{s}"),
+            Command::AbLoop => "ab-loop".into(),
+            Command::Stats => "stats".into(),
+            Command::Offline => "offline".into(),
+            Command::Discord(s) => format!("discord\t{s}"),
             Command::Status(f) => format!("status\t{f}"),
         }
     }
@@ -201,12 +237,23 @@ mod tests {
             Command::Next,
             Command::Volume("+5".into()),
             Command::Add("seether fine again".into()),
+            Command::Open("https://open.spotify.com/track/123".into()),
+            Command::Sleep("30".into()),
+            Command::Speed("1.25".into()),
+            Command::Eq("bass".into()),
+            Command::Quality("max".into()),
+            Command::AbLoop,
+            Command::Stats,
+            Command::Offline,
+            Command::Discord("on".into()),
             Command::Status("{title}".into()),
         ] {
             assert_eq!(Command::parse(&c.line()), Ok(c));
         }
         assert_eq!(Command::parse("status"), Ok(Command::Status(STATUS_FORMAT.into())));
+        assert_eq!(Command::parse("sleep"), Ok(Command::Sleep("status".into())));
         assert!(Command::parse("add").unwrap_err().contains("search query"));
+        assert!(Command::parse("open").unwrap_err().contains("URL"));
         assert!(Command::parse("dance").unwrap_err().contains("unknown"));
     }
 

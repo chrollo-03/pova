@@ -12,16 +12,22 @@ use ratatui_image::thread::ThreadProtocol;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::art::{ArtEvent, ArtReq};
+use crate::audio::{AbLoop, AudioQuality, AudioStreamInfo, EqPreset, EqSettings};
 use crate::config::{AccountChoice, Config, Paths, Session, State, VizMode};
+use crate::discord::{PresenceCmd, PresenceTrack};
+use crate::interlink::ExternalLink;
 use crate::keymap::{Action, Keymap};
 use crate::lyrics::{Lyrics, LyricsEvent, LyricsReq};
 use crate::model::{Item, PlaylistRef, Track, video_id_from_url};
+use crate::offline::{OfflineEvent, OfflineIndex, OfflineReq};
 use crate::player::mpv::{PlayerCmd, PlayerEvent};
 use crate::player::queue::{Queue, Repeat};
 use crate::resolve::{ResolveReq, Resolved};
+use crate::sleep::{SleepAction, SleepPreset, SleepTimer};
+use crate::stats::Stats;
 use crate::theme::{self, Theme};
 use crate::viz::Frame;
-use crate::ytm::{AccountInfo, SearchFilter, Suggestion, View, YtmEvent, YtmReq};
+use crate::ytm::{AccountInfo, LinkAction, SearchFilter, Suggestion, View, YtmEvent, YtmReq};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -51,15 +57,22 @@ pub enum LibSection {
     Playlists,
     Liked,
     History,
+    Offline,
 }
 
 impl LibSection {
-    pub const ALL: [LibSection; 3] = [LibSection::Playlists, LibSection::Liked, LibSection::History];
+    pub const ALL: [LibSection; 4] = [
+        LibSection::Playlists,
+        LibSection::Liked,
+        LibSection::History,
+        LibSection::Offline,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             LibSection::Playlists => "Playlists",
             LibSection::Liked => "Liked songs",
             LibSection::History => "History",
+            LibSection::Offline => "Offline",
         }
     }
     fn view(self) -> View {
@@ -67,6 +80,39 @@ impl LibSection {
             LibSection::Playlists => View::LibraryPlaylists,
             LibSection::Liked => View::LikedSongs,
             LibSection::History => View::History,
+            LibSection::Offline => View::Offline,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatsTab {
+    TopTracks,
+    TopArtists,
+    Recent,
+}
+
+impl StatsTab {
+    pub const ALL: [StatsTab; 3] = [StatsTab::TopTracks, StatsTab::TopArtists, StatsTab::Recent];
+    pub fn label(self) -> &'static str {
+        match self {
+            StatsTab::TopTracks => "Top tracks",
+            StatsTab::TopArtists => "Top artists",
+            StatsTab::Recent => "Recent",
+        }
+    }
+    pub fn next(self) -> StatsTab {
+        match self {
+            StatsTab::TopTracks => StatsTab::TopArtists,
+            StatsTab::TopArtists => StatsTab::Recent,
+            StatsTab::Recent => StatsTab::TopTracks,
+        }
+    }
+    pub fn prev(self) -> StatsTab {
+        match self {
+            StatsTab::TopTracks => StatsTab::Recent,
+            StatsTab::TopArtists => StatsTab::TopTracks,
+            StatsTab::Recent => StatsTab::TopArtists,
         }
     }
 }
@@ -244,11 +290,90 @@ pub struct PlayerState {
     pub paused: bool,
     pub volume: f64,
     pub muted: bool,
+    pub speed: f64,
+    pub audio: AudioStreamInfo,
     pub idle: bool,
     pub buffering: bool,
     pub ready: bool,
     /// Set if mpv failed to start or exited unexpectedly.
     pub error: Option<String>,
+}
+
+/// One actionable entry in the Interlink overlay (`i`).
+#[derive(Clone, Debug)]
+pub enum InterlinkAction {
+    GoToArtist {
+        name: String,
+        artist_id: Option<String>,
+    },
+    GoToAlbum {
+        title: String,
+        album_id: Option<String>,
+        artist: String,
+    },
+    StartRadio {
+        track: Track,
+    },
+    ToggleOffline {
+        track: Track,
+        saved: bool,
+    },
+    ViewLyrics,
+    CopyUniversal {
+        video_id: String,
+    },
+    CopyYtm {
+        video_id: String,
+    },
+    CopyTimestamped {
+        video_id: String,
+        secs: f64,
+    },
+    OpenYtm {
+        video_id: String,
+    },
+    OpenUniversal {
+        video_id: String,
+    },
+    SearchSpotify {
+        title: String,
+        artist: String,
+    },
+    SearchTidal {
+        title: String,
+        artist: String,
+    },
+}
+
+impl InterlinkAction {
+    pub fn label(&self) -> (String, String) {
+        match self {
+            InterlinkAction::GoToArtist { name, .. } => ("Go to Artist".into(), name.clone()),
+            InterlinkAction::GoToAlbum { title, .. } => ("Go to Album".into(), title.clone()),
+            InterlinkAction::StartRadio { .. } => ("Start Song Radio".into(), "similar tracks".into()),
+            InterlinkAction::ToggleOffline { saved, .. } => {
+                if *saved {
+                    ("Remove Offline Copy".into(), "free local cache".into())
+                } else {
+                    ("Save for Offline Playback".into(), "instant local cache".into())
+                }
+            }
+            InterlinkAction::ViewLyrics => ("Open Live Lyrics".into(), "synced".into()),
+            InterlinkAction::CopyUniversal { .. } => (
+                "Copy Universal Link".into(),
+                "song.link (Spotify · Tidal · YT)".into(),
+            ),
+            InterlinkAction::CopyYtm { .. } => ("Copy YouTube Music Link".into(), "music.youtube.com".into()),
+            InterlinkAction::CopyTimestamped { secs, .. } => (
+                "Copy Link at Current Time".into(),
+                format!("@ {}", crate::model::format_time(*secs)),
+            ),
+            InterlinkAction::OpenYtm { .. } => ("Open in YouTube Music".into(), "browser".into()),
+            InterlinkAction::OpenUniversal { .. } => ("Open on song.link".into(), "Spotify · Tidal · Apple".into()),
+            InterlinkAction::SearchSpotify { .. } => ("Find on Spotify".into(), "open.spotify.com".into()),
+            InterlinkAction::SearchTidal { .. } => ("Find on Tidal".into(), "listen.tidal.com".into()),
+        }
+    }
 }
 
 pub enum Overlay {
@@ -286,6 +411,28 @@ pub enum Overlay {
         items: Option<Vec<AccountInfo>>,
         state: TableState,
     },
+    /// Spotify-style sleep timer picker (`z`).
+    SleepTimer {
+        state: TableState,
+        /// Some while typing a custom number of minutes.
+        custom: Option<String>,
+    },
+    /// Spotify/Tidal-style 10-band interactive graphic equalizer (`e`).
+    Equalizer {
+        band: usize,
+    },
+    /// Interlink hub & Tidal-style Signal Path (`i`).
+    Interlink {
+        track: Track,
+        is_current: bool,
+        actions: Vec<InterlinkAction>,
+        state: TableState,
+    },
+    /// Spotify Wrapped Mini / Local listening statistics (`W`).
+    Stats {
+        tab: StatsTab,
+        state: TableState,
+    },
 }
 
 /// What a confirmed `Overlay::Confirm` does.
@@ -313,6 +460,15 @@ pub enum MenuItem {
     AlbumArt,
     Loudness,
     Notifications,
+    Discord,
+    AudioQuality,
+    Crossfade,
+    Equalizer,
+    SleepTimer,
+    Speed,
+    PitchLock,
+    Stats,
+    DedupeQueue,
     SwitchAccount,
     Account,
     Help,
@@ -320,13 +476,22 @@ pub enum MenuItem {
 }
 
 impl MenuItem {
-    pub const ALL: [MenuItem; 10] = [
+    pub const ALL: [MenuItem; 19] = [
         MenuItem::Themes,
         MenuItem::VizMode,
         MenuItem::Autoplay,
         MenuItem::AlbumArt,
         MenuItem::Loudness,
         MenuItem::Notifications,
+        MenuItem::Discord,
+        MenuItem::AudioQuality,
+        MenuItem::Crossfade,
+        MenuItem::Equalizer,
+        MenuItem::SleepTimer,
+        MenuItem::Speed,
+        MenuItem::PitchLock,
+        MenuItem::Stats,
+        MenuItem::DedupeQueue,
         MenuItem::SwitchAccount,
         MenuItem::Account,
         MenuItem::Help,
@@ -337,7 +502,16 @@ impl MenuItem {
     pub fn is_setting(self) -> bool {
         matches!(
             self,
-            MenuItem::VizMode | MenuItem::Autoplay | MenuItem::AlbumArt | MenuItem::Loudness | MenuItem::Notifications
+            MenuItem::VizMode
+                | MenuItem::Autoplay
+                | MenuItem::AlbumArt
+                | MenuItem::Loudness
+                | MenuItem::Notifications
+                | MenuItem::Discord
+                | MenuItem::AudioQuality
+                | MenuItem::Crossfade
+                | MenuItem::Speed
+                | MenuItem::PitchLock
         )
     }
 }
@@ -367,6 +541,20 @@ pub enum Hit {
     PlaylistPick(usize),
     Confirm(bool),
     CloseError,
+    SleepTimer,
+    SleepItem(usize),
+    AudioQuality,
+    NowPlayingArtist,
+    NowPlayingAlbum,
+    InterlinkItem(usize),
+    EqBand(usize),
+    EqToggle,
+    EqPrevPreset,
+    EqNextPreset,
+    EqReset,
+    LyricLine(usize),
+    StatsTab(StatsTab),
+    StatsItem(usize),
 }
 
 /// Clickable regions, rebuilt every frame.
@@ -440,6 +628,14 @@ pub fn is_liked(likes: &HashMap<String, bool>, track: &Track) -> bool {
     likes.get(&track.video_id).copied().or(track.liked).unwrap_or(false)
 }
 
+fn stats_row_count(stats: &Stats, tab: StatsTab) -> usize {
+    match tab {
+        StatsTab::TopTracks => stats.top_tracks(20).len(),
+        StatsTab::TopArtists => stats.top_artists(20).len(),
+        StatsTab::Recent => stats.recent_tracks(25).len(),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnqueueMode {
     Append,
@@ -447,12 +643,20 @@ pub enum EnqueueMode {
     PlayNow,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RadioMode {
     /// Automatic continuation when the queue runs out.
     Autoplay,
     /// User pressed `r`: replace the queue with seed + radio.
     Start,
+    /// User pressed `r` on the song that's playing: keep it playing and
+    /// replace only what comes after it.
+    Refill,
 }
+
+/// Seconds before the end of the last song at which autoplay fetches more,
+/// so the next song is ready before this one finishes.
+const AUTOPLAY_LEAD: f64 = 25.0;
 
 pub struct Channels {
     pub player: UnboundedSender<PlayerCmd>,
@@ -461,6 +665,8 @@ pub struct Channels {
     pub art: UnboundedSender<ArtReq>,
     pub resolve: UnboundedSender<ResolveReq>,
     pub notify: UnboundedSender<crate::notify::Note>,
+    pub discord: UnboundedSender<PresenceCmd>,
+    pub offline: UnboundedSender<OfflineReq>,
 }
 
 pub struct App {
@@ -481,8 +687,33 @@ pub struct App {
     pub library: LibraryState,
     pub lyrics: LyricsState,
     pub lyrics_scroll: Option<u16>,
+    /// Selected synced lyric line for interactive seek (Enter jumps to it).
+    pub lyrics_sel: Option<usize>,
     /// Scroll position the synced view chose last frame.
     pub lyrics_auto: u16,
+    /// Spotify-style sleep timer (countdown with fade-out, or end of track).
+    pub sleep: SleepTimer,
+    /// A-B loop section markers for the current track.
+    pub ab_loop: AbLoop,
+    /// Debounce timer so A-B seek doesn't double-fire on buffered mpv time updates.
+    ab_last_wrap: Option<Instant>,
+    /// Tracks when smooth track crossfade is attenuating mpv volume.
+    crossfade_active: bool,
+    crossfade_last_sent: Option<f64>,
+    /// Last sleep timer countdown second drawn, so the badge ticks once per second.
+    last_sleep_sec: Option<u64>,
+    /// Local listening statistics (Wrapped Mini).
+    pub stats: Stats,
+    stats_vid: Option<String>,
+    stats_listened: f64,
+    stats_counted: bool,
+    stats_dirty: bool,
+    /// Saved offline tracks index (`~/.cache/pova/offline/`).
+    pub offline: OfflineIndex,
+    /// Video IDs currently being downloaded to offline cache.
+    pub offline_pending: HashSet<String>,
+    /// Last Discord Rich Presence snapshot sent (deduplicates IPC frames).
+    last_discord: Option<Option<PresenceTrack>>,
     pub art: Option<ThreadProtocol>,
     /// Sad-cat mascot for tracks without lyrics.
     pub cat_art: Option<ThreadProtocol>,
@@ -532,10 +763,16 @@ pub struct App {
     notified: Option<String>,
     /// Disliked last song waiting for autoplay songs to skip to.
     skip_disliked: Option<String>,
-    /// Even loudness / notifications as last picked in the Esc menu; None
-    /// until then, so config.toml keeps deciding.
+    /// Even loudness / notifications / audio controls as last picked in UI;
+    /// None until then, so config.toml keeps deciding.
     picked_loudness: Option<bool>,
     picked_notifications: Option<bool>,
+    picked_discord: Option<bool>,
+    picked_quality: Option<AudioQuality>,
+    picked_crossfade: Option<u8>,
+    picked_speed: Option<f64>,
+    picked_pitch: Option<bool>,
+    picked_eq: Option<EqSettings>,
     /// Explicitly chosen YouTube account / Brand channel (remembered in state.toml).
     pub account: Option<AccountChoice>,
 }
@@ -555,9 +792,21 @@ impl App {
         cfg.album_art = state.album_art.unwrap_or(cfg.album_art);
         cfg.normalize_loudness = state.normalize_loudness.unwrap_or(cfg.normalize_loudness);
         cfg.notifications = state.notifications.unwrap_or(cfg.notifications);
+        cfg.discord_rpc = state.discord_rpc.unwrap_or(cfg.discord_rpc);
+        cfg.audio_quality = state.audio_quality.unwrap_or(cfg.audio_quality);
+        cfg.crossfade_secs = state.crossfade_secs.unwrap_or(cfg.crossfade_secs).min(12);
+        cfg.playback_speed = state.playback_speed.unwrap_or(cfg.playback_speed).clamp(0.25, 3.0);
+        cfg.pitch_correction = state.pitch_correction.unwrap_or(cfg.pitch_correction);
+        if let Some(eq) = state.eq.clone() {
+            cfg.eq = eq;
+        }
         let theme_name = state.theme.clone().unwrap_or_else(|| cfg.theme.clone());
         let theme = theme::load_named(&paths.config_dir, &theme_name, cfg.theme_background);
         let volume = state.volume.unwrap_or(cfg.volume).min(100) as f64;
+        let speed = cfg.playback_speed;
+        let sleep_fade = cfg.sleep_fade_secs;
+        let stats = Stats::load(&paths.stats_file());
+        let offline = OfflineIndex::load(&paths.offline_dir());
         App {
             theme,
             keymap,
@@ -571,6 +820,7 @@ impl App {
             queue_state: TableState::default(),
             player: PlayerState {
                 volume,
+                speed,
                 idle: true,
                 ..Default::default()
             },
@@ -582,7 +832,25 @@ impl App {
             },
             lyrics: LyricsState::None,
             lyrics_scroll: None,
+            lyrics_sel: None,
             lyrics_auto: 0,
+            sleep: SleepTimer {
+                fade_secs: sleep_fade,
+                ..SleepTimer::default()
+            },
+            ab_loop: AbLoop::Off,
+            ab_last_wrap: None,
+            crossfade_active: false,
+            crossfade_last_sent: None,
+            last_sleep_sec: None,
+            stats,
+            stats_vid: None,
+            stats_listened: 0.0,
+            stats_counted: false,
+            stats_dirty: false,
+            offline,
+            offline_pending: HashSet::new(),
+            last_discord: None,
             art,
             cat_art: None,
             art_key: None,
@@ -619,6 +887,12 @@ impl App {
             skip_disliked: None,
             picked_loudness: state.normalize_loudness,
             picked_notifications: state.notifications,
+            picked_discord: state.discord_rpc,
+            picked_quality: state.audio_quality,
+            picked_crossfade: state.crossfade_secs,
+            picked_speed: state.playback_speed,
+            picked_pitch: state.pitch_correction,
+            picked_eq: state.eq,
             account: state.account,
             cfg,
             paths,
@@ -669,6 +943,22 @@ impl App {
             MenuItem::AlbumArt => format!("Album art      ‹ {} ›", on_off(self.cfg.album_art)),
             MenuItem::Loudness => format!("Even loudness  ‹ {} ›", on_off(self.cfg.normalize_loudness)),
             MenuItem::Notifications => format!("Notifications  ‹ {} ›", on_off(self.cfg.notifications)),
+            MenuItem::Discord => format!("Discord status ‹ {} ›", on_off(self.cfg.discord_rpc)),
+            MenuItem::AudioQuality => format!("Audio quality  ‹ {} ›", self.cfg.audio_quality.label()),
+            MenuItem::Crossfade => format!(
+                "Crossfade      ‹ {} ›",
+                if self.cfg.crossfade_secs == 0 {
+                    "off".to_string()
+                } else {
+                    format!("{}s", self.cfg.crossfade_secs)
+                }
+            ),
+            MenuItem::Equalizer => format!("Equalizer      ‹ {} ›", self.cfg.eq.summary()),
+            MenuItem::SleepTimer => format!("Sleep timer    ‹ {} ›", self.sleep.menu_value(Instant::now())),
+            MenuItem::Speed => format!("Speed          ‹ {} ›", crate::audio::format_speed(self.cfg.playback_speed)),
+            MenuItem::PitchLock => format!("Pitch lock     ‹ {} ›", on_off(self.cfg.pitch_correction)),
+            MenuItem::Stats => format!("Listening stats ({} plays)", self.stats.total_plays),
+            MenuItem::DedupeQueue => "Remove queue duplicates".into(),
             MenuItem::SwitchAccount => match self.account.as_ref().and_then(|a| a.name.as_deref()) {
                 Some(name) if self.logged_in => format!("Switch account ({name})"),
                 _ => "Switch account".into(),
@@ -700,6 +990,54 @@ impl App {
                 self.cfg.notifications = !self.cfg.notifications;
                 self.picked_notifications = Some(self.cfg.notifications);
                 self.save_state();
+            }
+            MenuItem::Discord => {
+                self.set_discord_rpc(!self.cfg.discord_rpc);
+            }
+            MenuItem::Stats => self.open_stats(),
+            MenuItem::AudioQuality => {
+                let next = if forward {
+                    self.cfg.audio_quality.next()
+                } else {
+                    self.cfg.audio_quality.prev()
+                };
+                self.set_audio_quality(next);
+            }
+            MenuItem::Crossfade => {
+                let next = crate::audio::cycle_crossfade(self.cfg.crossfade_secs, forward);
+                self.cfg.crossfade_secs = next;
+                self.picked_crossfade = Some(next);
+                if next == 0 {
+                    self.restore_crossfade_volume();
+                }
+                self.save_state();
+            }
+            MenuItem::Equalizer => self.open_equalizer(),
+            MenuItem::SleepTimer => self.open_sleep_timer(),
+            MenuItem::Speed => {
+                let next = crate::audio::step_speed(self.cfg.playback_speed, forward);
+                self.set_playback_speed(next);
+            }
+            MenuItem::PitchLock => {
+                self.cfg.pitch_correction = !self.cfg.pitch_correction;
+                self.picked_pitch = Some(self.cfg.pitch_correction);
+                self.player(PlayerCmd::SetPitchCorrection(self.cfg.pitch_correction));
+                self.save_state();
+            }
+            MenuItem::DedupeQueue => {
+                let removed = self.queue.deduplicate_upcoming();
+                self.sync_next();
+                if removed == 0 {
+                    self.flash("No duplicate upcoming tracks in queue", false);
+                } else {
+                    self.flash(
+                        format!(
+                            "Removed {removed} duplicate track{} from queue",
+                            if removed == 1 { "" } else { "s" }
+                        ),
+                        false,
+                    );
+                }
             }
             MenuItem::VizMode => {
                 self.viz_mode = if forward {
@@ -784,6 +1122,12 @@ impl App {
             album_art: Some(self.cfg.album_art),
             normalize_loudness: self.picked_loudness,
             notifications: self.picked_notifications,
+            discord_rpc: self.picked_discord,
+            audio_quality: self.picked_quality,
+            crossfade_secs: self.picked_crossfade,
+            playback_speed: self.picked_speed,
+            pitch_correction: self.picked_pitch,
+            eq: self.picked_eq.clone(),
             account: self.account.clone(),
         }
         .save(&self.paths.state_file());
@@ -807,11 +1151,40 @@ impl App {
 
     /// Per-frame housekeeping. Returns true if a redraw is needed.
     pub fn tick(&mut self) -> bool {
+        let now = Instant::now();
         self.update_dwell();
+        if self.sleep.is_active() {
+            let is_playing = !self.player.paused && !self.player.idle;
+            match self.sleep.tick(now, self.player.volume, is_playing) {
+                SleepAction::None => {}
+                SleepAction::SetFadeVolume(v) => {
+                    self.crossfade_active = false;
+                    self.player(PlayerCmd::SetVolume(v));
+                }
+                SleepAction::Trigger { restore_volume } => {
+                    self.crossfade_active = false;
+                    self.player(PlayerCmd::SetPause(true));
+                    self.player.paused = true;
+                    if let Some(vol) = restore_volume {
+                        self.player.volume = vol;
+                        self.player(PlayerCmd::SetVolume(vol));
+                    }
+                    self.last_sleep_sec = None;
+                    self.flash("Sleep timer paused playback", false);
+                }
+            }
+            let rem_sec = self.sleep.remaining(now).map(|d| d.as_secs());
+            if rem_sec != self.last_sleep_sec {
+                self.last_sleep_sec = rem_sec;
+                self.dirty = true;
+            }
+        } else if self.last_sleep_sec.take().is_some() {
+            self.dirty = true;
+        }
         if let Some(w) = self.library.auth.waiting.as_mut()
             && !w.checking
             && w.started.elapsed() <= AUTH_POLL_TIMEOUT
-            && Instant::now() >= w.next_poll
+            && now >= w.next_poll
         {
             w.checking = true;
             let _ = self.tx.ytm.send(YtmReq::PollSignIn {
@@ -820,7 +1193,7 @@ impl App {
             });
         }
         if let Some(due) = self.search.suggest_due
-            && Instant::now() >= due
+            && now >= due
         {
             self.search.suggest_due = None;
             let query = self.search.input.trim().to_string();
@@ -829,7 +1202,7 @@ impl App {
             }
         }
         if let Some(f) = &self.flash
-            && Instant::now() > f.until
+            && now > f.until
         {
             self.flash = None;
             self.dirty = true;
@@ -883,6 +1256,9 @@ impl App {
 
     /// URL mpv should preload after the current track.
     fn desired_next(&mut self) -> Option<String> {
+        if self.sleep.is_end_of_track() {
+            return None; // stop cleanly after the current track finishes
+        }
         if self.queue.repeat == Repeat::One {
             return None; // mpv loops the file itself (loop-file)
         }
@@ -894,9 +1270,14 @@ impl App {
         Some(self.play_url(&track).0)
     }
 
-    /// Pre-resolved direct URL if fresh, else the YouTube Music link (mpv's
-    /// yt-dlp hook resolves it, ~3 s). Returns (url, is_direct).
+    /// Pre-resolved direct URL (or local offline cache file!) if available, else
+    /// the YouTube Music link (mpv's yt-dlp hook resolves it, ~3 s). Returns (url, is_direct).
     fn play_url(&mut self, track: &Track) -> (String, bool) {
+        if let Some(local) = self.offline.local_path(&self.paths.offline_dir(), &track.video_id) {
+            let path = local.to_string_lossy().into_owned();
+            self.url_vid.insert(path.clone(), track.video_id.clone());
+            return (path, true);
+        }
         let fresh = self
             .streams
             .get(&track.video_id)
@@ -911,8 +1292,11 @@ impl App {
         }
     }
 
-    /// Ask the resolver for a direct URL ahead of time (no-op if cached/pending).
+    /// Ask the resolver for a direct URL ahead of time (no-op if cached/pending/offline).
     pub fn prefetch(&mut self, video_id: &str) {
+        if self.offline.contains(video_id) {
+            return;
+        }
         let fresh = self
             .streams
             .get(video_id)
@@ -928,6 +1312,7 @@ impl App {
         self.resolving.insert(video_id.to_string());
         let _ = self.tx.resolve.send(ResolveReq {
             video_id: video_id.to_string(),
+            format: self.cfg.audio_quality.ytdl_format().to_string(),
         });
     }
 
@@ -1000,9 +1385,19 @@ impl App {
 
     fn on_track_changed(&mut self) {
         self.dirty = true;
+        self.save_stats();
+        self.stats_vid = self.current().map(|t| t.video_id.clone());
+        self.stats_listened = 0.0;
+        self.stats_counted = false;
+        self.ab_loop.clear();
+        self.ab_last_wrap = None;
+        self.lyrics_sel = None;
+        self.player.audio.clear();
+        self.restore_crossfade_volume();
         self.save_session();
         self.prefetch_upcoming();
         self.lyrics_scroll = None;
+        self.sync_discord(true);
         let Some(track) = self.current().cloned() else { return };
         // Lyrics
         if self.lyrics_requested.as_deref() != Some(&track.video_id) {
@@ -1198,12 +1593,84 @@ impl App {
             PlayerEvent::TimePos(t) => {
                 let prev = self.player.time;
                 self.player.time = t;
+                if self.player.duration > 0.0 && self.player.duration - t <= AUTOPLAY_LEAD {
+                    self.maybe_autoplay();
+                }
                 if t > 0.0 {
                     self.consecutive_errors = 0;
                     if let Some((t0, direct)) = self.start_timer.take() {
                         let how = if direct { "pre-resolved URL" } else { "yt-dlp hook" };
                         tracing::info!("track started in {} ms ({how})", t0.elapsed().as_millis());
                     }
+                }
+                // Accumulate local listening statistics (Wrapped Mini).
+                let delta = t - prev;
+                if !self.player.paused && !self.player.idle && delta > 0.0 && delta <= 5.0
+                    && let Some(track) = self.current().cloned()
+                {
+                    if self.stats_vid.as_deref() != Some(track.video_id.as_str()) {
+                        self.stats_vid = Some(track.video_id.clone());
+                        self.stats_listened = 0.0;
+                        self.stats_counted = false;
+                    }
+                    self.stats_listened += delta;
+                    let dur = if self.player.duration > 0.0 {
+                        self.player.duration
+                    } else {
+                        track.duration.unwrap_or(60.0)
+                    };
+                    let threshold = (dur * 0.5).clamp(5.0, 25.0);
+                    if !self.stats_counted && self.stats_listened >= threshold {
+                        self.stats_counted = true;
+                        self.stats
+                            .record_play(&track, self.stats_listened, crate::stats::now_unix());
+                        self.stats.save(&self.paths.stats_file());
+                        self.stats_dirty = false;
+                    } else if self.stats_counted {
+                        self.stats.add_listening_time(&track, delta);
+                        self.stats_dirty = true;
+                    }
+                } else if delta.abs() > 3.0 {
+                    // User scrubbed/seeked: refresh Discord timestamp bar.
+                    self.sync_discord(false);
+                }
+                // A-B section loop wrap-around (debounced 300ms so buffered updates don't double-seek).
+                if let Some(a) = self.ab_loop.wrap_target(t)
+                    && self
+                        .ab_last_wrap
+                        .is_none_or(|w| w.elapsed() >= Duration::from_millis(300))
+                {
+                    self.ab_last_wrap = Some(Instant::now());
+                    self.player(PlayerCmd::SeekAbsolute(a));
+                }
+                // Spotify-style smooth track fade envelope (yields to sleep timer fade-out).
+                if self.cfg.crossfade_secs > 0
+                    && !self.sleep.is_fading()
+                    && !self.player.paused
+                    && !self.player.muted
+                    && !self.player.idle
+                    && self.ab_loop == AbLoop::Off
+                {
+                    match crate::audio::crossfade_volume(
+                        self.player.volume,
+                        t,
+                        self.player.duration,
+                        self.cfg.crossfade_secs,
+                    ) {
+                        Some(v) => {
+                            if !self.crossfade_active
+                                || self.crossfade_last_sent.is_none_or(|p| (p - v).abs() >= 0.5)
+                            {
+                                self.crossfade_active = true;
+                                self.crossfade_last_sent = Some(v);
+                                self.player(PlayerCmd::SetVolume(v));
+                            }
+                        }
+                        None if self.crossfade_active => self.restore_crossfade_volume(),
+                        None => {}
+                    }
+                } else if self.crossfade_active && !self.sleep.is_fading() {
+                    self.restore_crossfade_volume();
                 }
                 let synced_lyrics = self.tab == Tab::Lyrics
                     && matches!(
@@ -1219,10 +1686,29 @@ impl App {
                 }
                 return;
             }
-            PlayerEvent::Duration(d) => self.player.duration = d,
-            PlayerEvent::Paused(p) => self.player.paused = p,
-            PlayerEvent::Volume(v) => self.player.volume = v,
+            PlayerEvent::Duration(d) => {
+                self.player.duration = d;
+                self.sync_discord(false);
+            }
+            PlayerEvent::Paused(p) => {
+                self.player.paused = p;
+                self.sync_discord(true);
+            }
+            PlayerEvent::Volume(v) => {
+                // Keep the user's logical volume intact while sleep timer or crossfade is ramping mpv.
+                if !self.sleep.is_fading() && !self.crossfade_active {
+                    self.player.volume = v;
+                }
+            }
             PlayerEvent::Muted(m) => self.player.muted = m,
+            PlayerEvent::Speed(s) => self.player.speed = s,
+            PlayerEvent::AudioCodec(c) => {
+                self.player.audio.codec = c;
+                self.sync_discord(false);
+            }
+            PlayerEvent::SampleRate(r) => self.player.audio.sample_rate = r,
+            PlayerEvent::Channels(ch) => self.player.audio.channels = ch,
+            PlayerEvent::AudioBitrate(b) => self.player.audio.bitrate = b,
             PlayerEvent::Buffering(b) => self.player.buffering = b,
             PlayerEvent::Path(Some(path)) => {
                 self.load_started = None;
@@ -1251,10 +1737,22 @@ impl App {
                 let was_playing = !self.player.idle;
                 self.player.idle = idle;
                 if idle && was_playing && self.load_started.is_none() {
+                    self.next_sent = None;
+                    if self.sleep.is_end_of_track() {
+                        self.sleep.cancel();
+                        self.restore_crossfade_volume();
+                        if self.queue.repeat == Repeat::One {
+                            self.player(PlayerCmd::SetLoopFile(true));
+                        }
+                        self.player.time = 0.0;
+                        self.player.paused = true;
+                        self.flash("Sleep timer stopped after track", false);
+                        self.dirty = true;
+                        return;
+                    }
                     // Fell off the end of mpv's playlist (end of queue, or the
                     // preloaded track failed). Continue from the queue unless
                     // every track we tried errored out.
-                    self.next_sent = None;
                     if self.consecutive_errors >= self.queue.len().max(1) {
                         self.player.time = 0.0;
                     } else {
@@ -1452,6 +1950,23 @@ impl App {
                             self.sync_next();
                         }
                     }
+                    Some(RadioMode::Refill) => {
+                        // Only if that song is still the one playing.
+                        if self.current().map(|t| t.video_id.as_str()) != Some(seed.as_str()) {
+                            return;
+                        }
+                        self.queue.truncate_after_current();
+                        let fresh: Vec<Track> = tracks
+                            .into_iter()
+                            .filter(|t| !self.queue.contains(&t.video_id))
+                            .collect();
+                        let n = fresh.len();
+                        self.queue.append(fresh);
+                        self.autoplay_requested = Some(seed);
+                        self.queue_state.select(self.queue.current);
+                        self.sync_next();
+                        self.flash(format!("Radio: {n} similar songs up next"), false);
+                    }
                     Some(RadioMode::Start) => {
                         let seed_track = self
                             .queue
@@ -1581,6 +2096,32 @@ impl App {
                     };
                 }
             }
+            YtmEvent::LinkResolved { action } => match action {
+                LinkAction::PlayTrack { track, start_secs } => {
+                    let title = track.title.clone();
+                    self.queue.insert_next(vec![track]);
+                    let idx = self.queue.current.map_or(0, |c| c + 1);
+                    self.load_index(idx, start_secs, false);
+                    self.flash(format!("Playing “{title}”"), false);
+                }
+                LinkAction::OpenView(view) => {
+                    self.set_tab(Tab::Search);
+                    let lv = self.load_view(view);
+                    self.search.stack.push(lv);
+                }
+                LinkAction::SearchAndPlay { query, filter } => {
+                    if filter == SearchFilter::Songs {
+                        self.play_query(query);
+                    } else {
+                        self.set_tab(Tab::Search);
+                        self.search.input = query.clone();
+                        self.search.cursor = query.chars().count();
+                        self.search.filter = filter;
+                        let lv = self.load_view(View::Search { filter, query });
+                        self.search.stack = vec![lv];
+                    }
+                }
+            },
         }
     }
 
@@ -1705,8 +2246,12 @@ impl App {
         ListView::new(view, token)
     }
 
-    /// Search for songs and play the first hit.
+    /// Search for songs and play the first hit (or open an external URL directly).
     pub fn play_query(&mut self, query: String) {
+        if let Some(link) = crate::interlink::parse_external_link(&query) {
+            self.open_external_link(link);
+            return;
+        }
         let token = self.token();
         self.pending.insert(token, Pending::PlayFirst);
         self.search.input = query.clone();
@@ -1794,6 +2339,7 @@ impl App {
                 let Some((v, relative)) = parse_amount(&arg) else {
                     return format!("error `{arg}` isn't a volume; use 40, +5 or -5");
                 };
+                self.crossfade_active = false;
                 let target = if relative { self.player.volume + v } else { v };
                 self.player.volume = target.clamp(0.0, 100.0).round();
                 self.player(PlayerCmd::SetVolume(self.player.volume));
@@ -1828,6 +2374,128 @@ impl App {
                 self.enqueue_first(q.clone(), EnqueueMode::PlayNow);
                 format!("ok playing the top result for “{q}”")
             }
+            C::Open(url) => match crate::interlink::parse_external_link(&url) {
+                Some(link) => {
+                    self.open_external_link(link);
+                    format!("ok opening {url}")
+                }
+                None => format!(
+                    "error `{url}` isn't a recognized YouTube, YouTube Music, Spotify, Tidal, or song.link URL"
+                ),
+            },
+            C::Sleep(arg) => match crate::sleep::parse_cli(&arg) {
+                Ok(crate::sleep::SleepCommand::Status) => {
+                    format!("ok {}", self.sleep.menu_value(Instant::now()))
+                }
+                Ok(crate::sleep::SleepCommand::Off) => {
+                    self.cancel_sleep_timer();
+                    "ok sleep timer off".into()
+                }
+                Ok(crate::sleep::SleepCommand::EndOfTrack) => {
+                    self.set_sleep_end_of_track();
+                    "ok sleep timer set to end of track".into()
+                }
+                Ok(crate::sleep::SleepCommand::SetMinutes(m)) => {
+                    self.set_sleep_minutes(m);
+                    format!("ok sleep timer set to {m} min")
+                }
+                Ok(crate::sleep::SleepCommand::AdjustMinutes(delta)) => {
+                    let msg = self.adjust_sleep_minutes(delta);
+                    format!("ok {msg}")
+                }
+                Err(e) => format!("error {e}"),
+            },
+            C::Speed(arg) => {
+                let s = arg.trim();
+                if s.eq_ignore_ascii_case("status") {
+                    format!("ok {}", crate::audio::format_speed(self.cfg.playback_speed))
+                } else if s == "+" || s.eq_ignore_ascii_case("up") {
+                    let next = crate::audio::step_speed(self.cfg.playback_speed, true);
+                    self.set_playback_speed(next);
+                    format!("ok speed {}", crate::audio::format_speed(next))
+                } else if s == "-" || s.eq_ignore_ascii_case("down") {
+                    let next = crate::audio::step_speed(self.cfg.playback_speed, false);
+                    self.set_playback_speed(next);
+                    format!("ok speed {}", crate::audio::format_speed(next))
+                } else if let Ok(v) = s.trim_end_matches('x').parse::<f64>()
+                    && v.is_finite()
+                    && (0.25..=3.0).contains(&v)
+                {
+                    self.set_playback_speed(v);
+                    format!("ok speed {}", crate::audio::format_speed(v))
+                } else {
+                    format!("error `{arg}` isn't a valid speed; use 0.5..2.0, +, -, or status")
+                }
+            }
+            C::Eq(arg) => {
+                let s = arg.trim().to_ascii_lowercase();
+                if s == "status" {
+                    format!("ok {}", self.cfg.eq.summary())
+                } else if s == "off" {
+                    self.cfg.eq.enabled = false;
+                    self.apply_eq();
+                    "ok eq off".into()
+                } else if s == "on" {
+                    self.cfg.eq.enabled = true;
+                    self.apply_eq();
+                    format!("ok eq {}", self.cfg.eq.summary())
+                } else if let Some(preset) = EqPreset::from_name(&s) {
+                    self.cfg.eq.apply_preset(preset);
+                    self.apply_eq();
+                    format!("ok eq {}", self.cfg.eq.summary())
+                } else {
+                    format!(
+                        "error unknown EQ preset `{arg}`; try off, flat, bass, vocal, rock, electronic, acoustic, pop, jazz, classical, treble, late_night"
+                    )
+                }
+            }
+            C::Quality(arg) => {
+                let s = arg.trim().to_ascii_lowercase();
+                let next = match s.as_str() {
+                    "status" => return format!("ok {}", self.cfg.audio_quality.label()),
+                    "max" | "hires" | "best" => AudioQuality::Max,
+                    "high" => AudioQuality::High,
+                    "normal" | "norm" | "med" | "medium" => AudioQuality::Normal,
+                    "low" | "saver" => AudioQuality::Low,
+                    _ => return format!("error unknown quality `{arg}`; use max, high, normal, or low"),
+                };
+                self.set_audio_quality(next);
+                format!("ok quality {}", next.label())
+            }
+            C::AbLoop => {
+                if !has_track {
+                    return "error nothing is playing".into();
+                }
+                let msg = self.toggle_ab_loop();
+                format!("ok {msg}")
+            }
+            C::Stats => format!("ok {}", self.stats.cli_summary(crate::stats::now_unix())),
+            C::Offline => {
+                if !has_track {
+                    return "error nothing is playing".into();
+                }
+                let msg = self.toggle_offline_for_target(true);
+                format!("ok {msg}")
+            }
+            C::Discord(arg) => {
+                let s = arg.trim().to_ascii_lowercase();
+                match s.as_str() {
+                    "status" => format!("ok {}", if self.cfg.discord_rpc { "on" } else { "off" }),
+                    "on" | "true" | "1" => {
+                        self.set_discord_rpc(true);
+                        "ok discord on".into()
+                    }
+                    "off" | "false" | "0" => {
+                        self.set_discord_rpc(false);
+                        "ok discord off".into()
+                    }
+                    "toggle" => {
+                        self.set_discord_rpc(!self.cfg.discord_rpc);
+                        format!("ok discord {}", if self.cfg.discord_rpc { "on" } else { "off" })
+                    }
+                    _ => format!("error unknown discord mode `{arg}`; use on, off, toggle, or status"),
+                }
+            }
             C::Status(format) => format!("ok {}", self.status_line(&format)),
         }
     }
@@ -1846,6 +2514,10 @@ impl App {
         } else {
             t.duration.unwrap_or(0.0)
         };
+        let sleep = self.sleep.badge(Instant::now()).unwrap_or_default();
+        let quality = self.player.audio.badge(self.cfg.audio_quality);
+        let speed = crate::audio::format_speed(self.cfg.playback_speed);
+        let eq = self.cfg.eq.summary();
         expand_template(format, |key| match key {
             "title" => Some(t.title.clone()),
             "artist" => Some(t.artists.clone()),
@@ -1855,6 +2527,10 @@ impl App {
             "duration" => Some(crate::model::format_time(duration)),
             "volume" => Some(format!("{}", self.player.volume.round())),
             "liked" => Some(liked.to_string()),
+            "sleep" => Some(sleep.clone()),
+            "quality" => Some(quality.clone()),
+            "speed" => Some(speed.clone()),
+            "eq" => Some(eq.clone()),
             _ => None,
         })
     }
@@ -2263,6 +2939,10 @@ impl App {
         if query.is_empty() {
             return;
         }
+        if let Some(link) = crate::interlink::parse_external_link(&query) {
+            self.open_external_link(link);
+            return;
+        }
         let lv = self.load_view(View::Search {
             filter: self.search.filter,
             query,
@@ -2272,6 +2952,10 @@ impl App {
 
     fn switch_library(&mut self, section: LibSection) {
         self.library.section = section;
+        if section == LibSection::Offline {
+            self.refresh_offline_view();
+            return;
+        }
         let lv = self.load_view(section.view());
         self.library.stack = vec![lv];
     }
@@ -2284,7 +2968,9 @@ impl App {
         match tab {
             Tab::Search => {}
             Tab::Library => {
-                if self.logged_in {
+                if self.library.section == LibSection::Offline {
+                    self.refresh_offline_view();
+                } else if self.logged_in {
                     if self.library.stack.is_empty() {
                         self.switch_library(self.library.section);
                     }
@@ -2319,7 +3005,7 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        if self.tab == Tab::Library && !self.logged_in {
+        if self.tab == Tab::Library && !self.logged_in && self.library.section != LibSection::Offline {
             if self.library.auth.busy.is_none()
                 && self.library.auth.waiting.is_none()
                 && self.library.auth.input.is_none()
@@ -2334,6 +3020,18 @@ impl App {
             return;
         }
         if self.tab == Tab::Lyrics {
+            if let LyricsState::Found {
+                lyrics: Lyrics::Synced(lines),
+                ..
+            } = &self.lyrics
+                && !lines.is_empty()
+            {
+                let active = crate::lyrics::active_line(lines, self.player.time + 0.25).unwrap_or(0);
+                let cur = self.lyrics_sel.unwrap_or(active) as isize;
+                let next = (cur + delta).clamp(0, lines.len() as isize - 1) as usize;
+                self.lyrics_sel = Some(next);
+                return;
+            }
             let cur = self.lyrics_scroll.unwrap_or(self.lyrics_auto) as isize;
             self.lyrics_scroll = Some((cur + delta).max(0) as u16);
             return;
@@ -2407,6 +3105,7 @@ impl App {
             Next => self.next_track(),
             Prev => self.prev_track(),
             VolumeUp | VolumeDown => {
+                self.crossfade_active = false;
                 let d = if action == VolumeUp { 5.0 } else { -5.0 };
                 self.player.volume = ((self.player.volume / 5.0).round() * 5.0 + d).clamp(0.0, 100.0);
                 self.player(PlayerCmd::SetVolume(self.player.volume));
@@ -2503,7 +3202,12 @@ impl App {
             }
             Radio => {
                 let seed = match self.tab {
-                    Tab::Queue => self.queue_state.selected().and_then(|i| self.queue.get(i)).cloned(),
+                    Tab::Queue => self
+                        .queue_state
+                        .selected()
+                        .and_then(|i| self.queue.get(i))
+                        .or_else(|| self.current())
+                        .cloned(),
                     Tab::Search => self
                         .search
                         .stack
@@ -2521,7 +3225,9 @@ impl App {
                     _ => self.current().cloned(),
                 };
                 if let Some(t) = seed {
-                    self.radio.insert(t.video_id.clone(), RadioMode::Start);
+                    let playing = self.current().is_some_and(|c| c.video_id == t.video_id);
+                    let mode = if playing { RadioMode::Refill } else { RadioMode::Start };
+                    self.radio.insert(t.video_id.clone(), mode);
                     let _ = self.tx.ytm.send(YtmReq::Radio { seed: t.video_id });
                     self.flash(format!("Starting radio from {}…", t.title), false);
                 }
@@ -2536,7 +3242,7 @@ impl App {
                         let n = all.len();
                         let next = all[if fwd { (i + 1) % n } else { (i + n - 1) % n }];
                         self.library.section = next;
-                        if self.logged_in {
+                        if self.logged_in || next == LibSection::Offline {
                             self.switch_library(next);
                         }
                     }
@@ -2547,7 +3253,22 @@ impl App {
                 self.queue.clear_upcoming();
                 self.queue_state.select(self.queue.current);
                 self.sync_next();
-                self.flash("Queue cleared", false);
+                // The cleared songs may have come from autoplay: forget that
+                // radio (and drop one still on its way) so a fresh one is
+                // fetched near the end of this song.
+                if let Some(seed) = self.autoplay_requested.take()
+                    && self.radio.get(&seed) == Some(&RadioMode::Autoplay)
+                {
+                    self.radio.remove(&seed);
+                }
+                if self.cfg.autoplay
+                    && self.queue.repeat == crate::player::queue::Repeat::Off
+                    && self.current().is_some()
+                {
+                    self.flash("Queue cleared (autoplay on)", false);
+                } else {
+                    self.flash("Queue cleared", false);
+                }
             }
             Refresh => match self.tab {
                 Tab::Search => {
@@ -2565,12 +3286,42 @@ impl App {
                 _ => {}
             },
             JumpToCurrent => match self.tab {
-                Tab::Lyrics => self.lyrics_scroll = None,
+                Tab::Lyrics => {
+                    self.lyrics_scroll = None;
+                    self.lyrics_sel = None;
+                }
                 _ => {
                     self.set_tab(Tab::Queue);
                     self.queue_state.select(self.queue.current);
                 }
             },
+            SleepTimer => self.open_sleep_timer(),
+            Interlink => self.open_interlink(),
+            Equalizer => self.open_equalizer(),
+            AbLoop => {
+                if self.current().is_some() {
+                    let msg = self.toggle_ab_loop();
+                    self.flash(msg, false);
+                } else {
+                    self.flash("Play a track first to set an A-B loop", false);
+                }
+            }
+            CopyLink => self.copy_universal_link(),
+            SpeedUp => {
+                let next = crate::audio::step_speed(self.cfg.playback_speed, true);
+                self.set_playback_speed(next);
+                self.flash(format!("Speed: {}", crate::audio::format_speed(next)), false);
+            }
+            SpeedDown => {
+                let next = crate::audio::step_speed(self.cfg.playback_speed, false);
+                self.set_playback_speed(next);
+                self.flash(format!("Speed: {}", crate::audio::format_speed(next)), false);
+            }
+            Stats => self.open_stats(),
+            SaveOffline => {
+                let msg = self.toggle_offline_for_target(false);
+                self.flash(msg, false);
+            }
         }
     }
 
@@ -2582,7 +3333,10 @@ impl App {
             Tab::Library if self.library.stack.len() > 1 => {
                 self.library.stack.pop();
             }
-            Tab::Lyrics if self.lyrics_scroll.is_some() => self.lyrics_scroll = None,
+            Tab::Lyrics if self.lyrics_scroll.is_some() || self.lyrics_sel.is_some() => {
+                self.lyrics_scroll = None;
+                self.lyrics_sel = None;
+            }
             _ => {
                 let mut state = TableState::default();
                 state.select(Some(0));
@@ -2607,7 +3361,7 @@ impl App {
             }
             Tab::Search => self.select_in_browser(mode),
             Tab::Library => {
-                if !self.logged_in {
+                if !self.logged_in && self.library.section != LibSection::Offline {
                     if mode == EnqueueMode::PlayNow {
                         self.select_auth_profile(self.library.auth.selected);
                     }
@@ -2615,7 +3369,24 @@ impl App {
                     self.select_in_browser(mode);
                 }
             }
-            Tab::NowPlaying | Tab::Lyrics => {
+            Tab::Lyrics => {
+                if mode == EnqueueMode::PlayNow {
+                    if let Some(idx) = self.lyrics_sel
+                        && let LyricsState::Found {
+                            lyrics: Lyrics::Synced(lines),
+                            ..
+                        } = &self.lyrics
+                        && let Some((ts, _)) = lines.get(idx)
+                    {
+                        self.player(PlayerCmd::SeekAbsolute(*ts));
+                        self.lyrics_sel = None;
+                        self.lyrics_scroll = None;
+                        return;
+                    }
+                    self.dispatch(Action::PlayPause);
+                }
+            }
+            Tab::NowPlaying => {
                 if mode == EnqueueMode::PlayNow {
                     self.dispatch(Action::PlayPause);
                 }
@@ -2635,7 +3406,10 @@ impl App {
             return;
         };
         let view = lv.view.clone();
-        let whole_list = matches!(view, View::Album(_) | View::Playlist(_) | View::LikedSongs);
+        let whole_list = matches!(
+            view,
+            View::Album(_) | View::Playlist(_) | View::LikedSongs | View::Offline
+        );
         let list_tracks = lv.tracks();
         // Count tracks preceding the selected row so duplicate songs in a
         // playlist start at the exact row the user chose.
@@ -2800,9 +3574,19 @@ impl App {
         }
     }
 
-    /// `d` in the Library tab: take the selected song out of the open playlist.
+    /// `d` in the Library tab: take the selected song out of the open playlist (or Offline cache).
     fn remove_from_playlist(&mut self) {
         let Some(lv) = self.library.stack.last() else { return };
+        if lv.view == View::Offline {
+            if let Some(Item::Track(t)) = lv.selected().cloned() {
+                let dir = self.paths.offline_dir();
+                if self.offline.remove(&dir, &t.video_id).is_some() {
+                    self.refresh_offline_view();
+                    self.flash(format!("Removed “{}” from offline cache", t.title), false);
+                }
+            }
+            return;
+        }
         let View::Playlist(playlist_id) = &lv.view else {
             self.flash("Open one of your playlists to remove songs from it", false);
             return;
@@ -2858,6 +3642,532 @@ impl App {
             }
         } else {
             self.sync_next();
+        }
+    }
+
+    // ───────────────────────────── sleep, audio & interlink ─────────────────────────────
+
+    fn restore_crossfade_volume(&mut self) {
+        if self.crossfade_active {
+            self.crossfade_active = false;
+            self.crossfade_last_sent = None;
+            if !self.sleep.is_fading() {
+                self.player(PlayerCmd::SetVolume(self.player.volume));
+            }
+        }
+    }
+
+    pub fn open_sleep_timer(&mut self) {
+        let mut state = TableState::default();
+        let initial = match self.sleep.mode {
+            crate::sleep::SleepMode::EndOfTrack => 0,
+            crate::sleep::SleepMode::Countdown { .. } => 4,
+            crate::sleep::SleepMode::Off => 3, // 15 minutes default highlight
+        };
+        state.select(Some(initial));
+        self.overlay = Some(Overlay::SleepTimer { state, custom: None });
+    }
+
+    fn set_sleep_minutes(&mut self, minutes: u64) {
+        let was_eot = self.sleep.is_end_of_track();
+        if let Some(vol) = self.sleep.set_minutes(minutes, Instant::now()) {
+            self.player.volume = vol;
+            self.player(PlayerCmd::SetVolume(vol));
+        }
+        if was_eot {
+            if self.queue.repeat == Repeat::One {
+                self.player(PlayerCmd::SetLoopFile(true));
+            }
+            self.sync_next();
+        }
+        self.flash(format!("Sleep timer: {minutes} min"), false);
+    }
+
+    fn set_sleep_end_of_track(&mut self) {
+        if let Some(vol) = self.sleep.set_end_of_track() {
+            self.player.volume = vol;
+            self.player(PlayerCmd::SetVolume(vol));
+        }
+        self.player(PlayerCmd::SetLoopFile(false));
+        self.sync_next();
+        self.flash("Sleep timer: end of current track", false);
+    }
+
+    fn cancel_sleep_timer(&mut self) {
+        let was_eot = self.sleep.is_end_of_track();
+        if let Some(vol) = self.sleep.cancel() {
+            self.player.volume = vol;
+            self.player(PlayerCmd::SetVolume(vol));
+        }
+        if was_eot {
+            if self.queue.repeat == Repeat::One {
+                self.player(PlayerCmd::SetLoopFile(true));
+            }
+            self.sync_next();
+        }
+        self.last_sleep_sec = None;
+        self.flash("Sleep timer turned off", false);
+    }
+
+    fn adjust_sleep_minutes(&mut self, delta: i64) -> String {
+        let was_eot = self.sleep.is_end_of_track();
+        let (msg, restore) = self.sleep.adjust_minutes(delta, Instant::now());
+        if let Some(vol) = restore {
+            self.player.volume = vol;
+            self.player(PlayerCmd::SetVolume(vol));
+        }
+        if was_eot && !self.sleep.is_end_of_track() {
+            if self.queue.repeat == Repeat::One {
+                self.player(PlayerCmd::SetLoopFile(true));
+            }
+            self.sync_next();
+        }
+        self.flash(msg.clone(), false);
+        msg
+    }
+
+    fn apply_sleep_preset(&mut self, preset: SleepPreset) {
+        match preset {
+            SleepPreset::EndOfTrack => {
+                self.overlay = None;
+                self.set_sleep_end_of_track();
+            }
+            SleepPreset::Minutes(m) => {
+                self.overlay = None;
+                self.set_sleep_minutes(m);
+            }
+            SleepPreset::Custom => {
+                if let Some(Overlay::SleepTimer { custom, .. }) = self.overlay.as_mut() {
+                    *custom = Some(String::new());
+                }
+            }
+            SleepPreset::Off => {
+                self.overlay = None;
+                self.cancel_sleep_timer();
+            }
+        }
+    }
+
+    pub fn open_equalizer(&mut self) {
+        self.overlay = Some(Overlay::Equalizer { band: 0 });
+    }
+
+    fn apply_eq(&mut self) {
+        self.picked_eq = Some(self.cfg.eq.clone());
+        self.player(PlayerCmd::SetEq(self.cfg.eq.mpv_filter()));
+        self.save_state();
+    }
+
+    fn set_audio_quality(&mut self, quality: AudioQuality) {
+        self.cfg.audio_quality = quality;
+        self.picked_quality = Some(quality);
+        // Drop pre-resolved streams so upcoming tracks fetch the newly chosen quality tier.
+        self.streams.clear();
+        self.next_sent = None;
+        self.player(PlayerCmd::SetYtdlFormat(quality.ytdl_format().into()));
+        self.sync_next();
+        self.save_state();
+    }
+
+    fn set_playback_speed(&mut self, speed: f64) {
+        let s = (speed * 100.0).round() / 100.0;
+        let s = s.clamp(0.25, 3.0);
+        self.cfg.playback_speed = s;
+        self.player.speed = s;
+        self.picked_speed = Some(s);
+        self.player(PlayerCmd::SetSpeed(s));
+        self.save_state();
+    }
+
+    fn toggle_ab_loop(&mut self) -> String {
+        self.ab_last_wrap = None;
+        self.ab_loop.toggle(self.player.time)
+    }
+
+    pub fn open_interlink(&mut self) {
+        let Some(track) = self.target_track() else {
+            self.flash("Select or play a track first to interlink", false);
+            return;
+        };
+        let is_current = self.current().is_some_and(|c| c.video_id == track.video_id);
+        let mut actions = Vec::new();
+        if !track.artists.trim().is_empty() {
+            actions.push(InterlinkAction::GoToArtist {
+                name: track.artists.clone(),
+                artist_id: track.artist_id.clone(),
+            });
+        }
+        if let Some(album) = track.album.as_deref().filter(|a| !a.trim().is_empty()) {
+            actions.push(InterlinkAction::GoToAlbum {
+                title: album.to_string(),
+                album_id: track.album_id.clone(),
+                artist: track.artists.clone(),
+            });
+        }
+        actions.push(InterlinkAction::StartRadio { track: track.clone() });
+        actions.push(InterlinkAction::ToggleOffline {
+            saved: self.offline.contains(&track.video_id),
+            track: track.clone(),
+        });
+        if is_current {
+            actions.push(InterlinkAction::ViewLyrics);
+        }
+        actions.push(InterlinkAction::CopyUniversal {
+            video_id: track.video_id.clone(),
+        });
+        actions.push(InterlinkAction::CopyYtm {
+            video_id: track.video_id.clone(),
+        });
+        if is_current && self.player.time >= 1.0 {
+            actions.push(InterlinkAction::CopyTimestamped {
+                video_id: track.video_id.clone(),
+                secs: self.player.time,
+            });
+        }
+        actions.push(InterlinkAction::OpenUniversal {
+            video_id: track.video_id.clone(),
+        });
+        actions.push(InterlinkAction::OpenYtm {
+            video_id: track.video_id.clone(),
+        });
+        actions.push(InterlinkAction::SearchSpotify {
+            title: track.title.clone(),
+            artist: track.artists.clone(),
+        });
+        actions.push(InterlinkAction::SearchTidal {
+            title: track.title.clone(),
+            artist: track.artists.clone(),
+        });
+        let mut state = TableState::default();
+        state.select(Some(0));
+        self.overlay = Some(Overlay::Interlink {
+            track,
+            is_current,
+            actions,
+            state,
+        });
+    }
+
+    fn execute_interlink(&mut self, action: InterlinkAction) {
+        match action {
+            InterlinkAction::GoToArtist { name, artist_id } => self.go_to_artist(name, artist_id),
+            InterlinkAction::GoToAlbum {
+                title,
+                album_id,
+                artist,
+            } => self.go_to_album(title, album_id, artist),
+            InterlinkAction::StartRadio { track } => {
+                let playing = self.current().is_some_and(|c| c.video_id == track.video_id);
+                let mode = if playing { RadioMode::Refill } else { RadioMode::Start };
+                self.radio.insert(track.video_id.clone(), mode);
+                let _ = self.tx.ytm.send(YtmReq::Radio { seed: track.video_id });
+                self.flash(format!("Starting radio from {}…", track.title), false);
+            }
+            InterlinkAction::ToggleOffline { track, .. } => {
+                let msg = self.toggle_offline_track(track);
+                self.flash(msg, false);
+            }
+            InterlinkAction::ViewLyrics => self.set_tab(Tab::Lyrics),
+            InterlinkAction::CopyUniversal { video_id } => {
+                let url = crate::interlink::universal_url(&video_id);
+                match crate::interlink::copy_to_clipboard(&url) {
+                    Ok(where_) => self.flash(format!("Copied universal link to {where_}: {url}"), false),
+                    Err(e) => self.flash(e, true),
+                }
+            }
+            InterlinkAction::CopyYtm { video_id } => {
+                let url = crate::interlink::ytm_url(&video_id, None);
+                match crate::interlink::copy_to_clipboard(&url) {
+                    Ok(where_) => self.flash(format!("Copied YouTube Music link to {where_}"), false),
+                    Err(e) => self.flash(e, true),
+                }
+            }
+            InterlinkAction::CopyTimestamped { video_id, secs } => {
+                let url = crate::interlink::ytm_url(&video_id, Some(secs));
+                match crate::interlink::copy_to_clipboard(&url) {
+                    Ok(where_) => self.flash(
+                        format!(
+                            "Copied link @ {} to {where_}",
+                            crate::model::format_time(secs)
+                        ),
+                        false,
+                    ),
+                    Err(e) => self.flash(e, true),
+                }
+            }
+            InterlinkAction::OpenUniversal { video_id } => {
+                let url = crate::interlink::universal_url(&video_id);
+                match crate::interlink::open_in_browser(&url) {
+                    Ok(()) => self.flash(format!("Opened {url}"), false),
+                    Err(e) => self.flash(e, true),
+                }
+            }
+            InterlinkAction::OpenYtm { video_id } => {
+                let url = crate::interlink::ytm_url(&video_id, None);
+                match crate::interlink::open_in_browser(&url) {
+                    Ok(()) => self.flash("Opened in YouTube Music", false),
+                    Err(e) => self.flash(e, true),
+                }
+            }
+            InterlinkAction::SearchSpotify { title, artist } => {
+                let url = crate::interlink::spotify_search_url(&title, &artist);
+                match crate::interlink::open_in_browser(&url) {
+                    Ok(()) => self.flash("Opened Spotify search", false),
+                    Err(e) => self.flash(e, true),
+                }
+            }
+            InterlinkAction::SearchTidal { title, artist } => {
+                let url = crate::interlink::tidal_search_url(&title, &artist);
+                match crate::interlink::open_in_browser(&url) {
+                    Ok(()) => self.flash("Opened Tidal search", false),
+                    Err(e) => self.flash(e, true),
+                }
+            }
+        }
+    }
+
+    fn copy_universal_link(&mut self) {
+        let Some(track) = self.target_track() else {
+            self.flash("Select or play a track first to copy its link", false);
+            return;
+        };
+        let url = crate::interlink::universal_url(&track.video_id);
+        match crate::interlink::copy_to_clipboard(&url) {
+            Ok(where_) => self.flash(format!("Copied song.link to {where_}: {url}"), false),
+            Err(e) => self.flash(e, true),
+        }
+    }
+
+    fn go_to_artist(&mut self, name: String, artist_id: Option<String>) {
+        self.set_tab(Tab::Search);
+        if let Some(id) = artist_id {
+            let lv = self.load_view(View::Artist(id));
+            self.search.stack.push(lv);
+        } else {
+            let query = crate::lyrics::primary_artist(&name);
+            self.search.input = query.clone();
+            self.search.cursor = query.chars().count();
+            self.search.filter = SearchFilter::Artists;
+            let lv = self.load_view(View::Search {
+                filter: SearchFilter::Artists,
+                query,
+            });
+            self.search.stack = vec![lv];
+        }
+    }
+
+    fn go_to_album(&mut self, title: String, album_id: Option<String>, artist: String) {
+        self.set_tab(Tab::Search);
+        if let Some(id) = album_id {
+            let lv = self.load_view(View::Album(id));
+            self.search.stack.push(lv);
+        } else {
+            let query = if artist.trim().is_empty() {
+                title
+            } else {
+                format!("{title} {}", crate::lyrics::primary_artist(&artist))
+            };
+            self.search.input = query.clone();
+            self.search.cursor = query.chars().count();
+            self.search.filter = SearchFilter::Albums;
+            let lv = self.load_view(View::Search {
+                filter: SearchFilter::Albums,
+                query,
+            });
+            self.search.stack = vec![lv];
+        }
+    }
+
+    pub fn open_external_link(&mut self, link: ExternalLink) {
+        let label = match &link {
+            ExternalLink::YouTubeTrack { .. } => "YouTube track",
+            ExternalLink::YouTubePlaylist { .. } => "YouTube playlist",
+            ExternalLink::YouTubeAlbum { .. } => "YouTube album",
+            ExternalLink::YouTubeArtist { .. } => "YouTube artist",
+            ExternalLink::CrossPlatform { service, .. } => service,
+        };
+        let _ = self.tx.ytm.send(YtmReq::ResolveLink { link });
+        self.flash(format!("Opening {label} link…"), false);
+    }
+
+    pub fn save_stats(&mut self) {
+        if self.stats_dirty {
+            self.stats.save(&self.paths.stats_file());
+            self.stats_dirty = false;
+        }
+    }
+
+    pub fn open_stats(&mut self) {
+        let mut state = TableState::default();
+        if !self.stats.top_tracks(1).is_empty() {
+            state.select(Some(0));
+        }
+        self.overlay = Some(Overlay::Stats {
+            tab: StatsTab::TopTracks,
+            state,
+        });
+    }
+
+    fn stats_row_count(&self, tab: StatsTab) -> usize {
+        stats_row_count(&self.stats, tab)
+    }
+
+    fn activate_stats_row(&mut self, tab: StatsTab, idx: usize) {
+        match tab {
+            StatsTab::TopTracks => {
+                if let Some(st) = self.stats.top_tracks(20).get(idx) {
+                    let tr = st.track.to_track();
+                    self.overlay = None;
+                    self.enqueue(vec![tr], EnqueueMode::PlayNow);
+                }
+            }
+            StatsTab::Recent => {
+                if let Some(st) = self.stats.recent_tracks(25).get(idx) {
+                    let tr = st.track.to_track();
+                    self.overlay = None;
+                    self.enqueue(vec![tr], EnqueueMode::PlayNow);
+                }
+            }
+            StatsTab::TopArtists => {
+                if let Some(a) = self.stats.top_artists(20).get(idx) {
+                    let name = a.name.clone();
+                    let id = a.artist_id.clone();
+                    self.overlay = None;
+                    self.go_to_artist(name, id);
+                }
+            }
+        }
+    }
+
+    pub fn is_offline_cached(&self, video_id: &str) -> bool {
+        self.offline.contains(video_id)
+    }
+
+    fn refresh_offline_view(&mut self) {
+        let tracks = self.offline.tracks_newest_first();
+        let n = tracks.len();
+        let size = crate::offline::format_bytes(self.offline.total_bytes());
+        let mut lv = ListView::new(View::Offline, 0);
+        lv.loading = false;
+        lv.title = if n == 0 {
+            "Offline · press O on any song to save it locally".into()
+        } else {
+            format!("Offline · {n} track{} ({size})", if n == 1 { "" } else { "s" })
+        };
+        lv.items = tracks.into_iter().map(Item::Track).collect();
+        if !lv.items.is_empty() {
+            lv.state.select(Some(0));
+        }
+        self.library.stack = vec![lv];
+    }
+
+    fn toggle_offline_for_target(&mut self, current_only: bool) -> String {
+        let track = if current_only {
+            self.current().cloned()
+        } else {
+            self.target_track()
+        };
+        let Some(track) = track else {
+            return "Select or play a track first to save offline".into();
+        };
+        self.toggle_offline_track(track)
+    }
+
+    fn toggle_offline_track(&mut self, track: Track) -> String {
+        let dir = self.paths.offline_dir();
+        if self.offline.contains(&track.video_id) {
+            self.offline.remove(&dir, &track.video_id);
+            if self.library.section == LibSection::Offline && self.tab == Tab::Library {
+                self.refresh_offline_view();
+            }
+            return format!("Removed “{}” from offline cache", track.title);
+        }
+        if !self.offline_pending.insert(track.video_id.clone()) {
+            return format!("Already saving “{}” offline…", track.title);
+        }
+        let title = track.title.clone();
+        let _ = self.tx.offline.send(OfflineReq {
+            track,
+            format: self.cfg.audio_quality.ytdl_format().to_string(),
+        });
+        format!("Saving “{title}” offline…")
+    }
+
+    pub fn on_offline(&mut self, ev: OfflineEvent) {
+        self.dirty = true;
+        match ev {
+            OfflineEvent::Saved(entry) => {
+                let vid = entry.track.video_id.clone();
+                let title = entry.track.title.clone();
+                let size = crate::offline::format_bytes(entry.bytes);
+                self.offline_pending.remove(&vid);
+                self.offline.entries.insert(vid, entry);
+                self.offline.save(&self.paths.offline_dir());
+                if self.library.section == LibSection::Offline && self.tab == Tab::Library {
+                    self.refresh_offline_view();
+                }
+                self.sync_next();
+                self.flash(format!("Saved “{title}” offline ({size})"), false);
+            }
+            OfflineEvent::Failed { video_id, title, error } => {
+                self.offline_pending.remove(&video_id);
+                self.flash(format!("Couldn't save “{title}” offline: {error}"), true);
+            }
+        }
+    }
+
+    fn set_discord_rpc(&mut self, on: bool) {
+        self.cfg.discord_rpc = on;
+        self.picked_discord = Some(on);
+        let _ = self.tx.discord.send(PresenceCmd::SetEnabled(on));
+        self.last_discord = None;
+        if on {
+            self.sync_discord(true);
+        }
+        self.save_state();
+    }
+
+    fn sync_discord(&mut self, force: bool) {
+        if !self.cfg.discord_rpc {
+            return;
+        }
+        let next = self.current().map(|t| {
+            let quality_badge = if self.offline.contains(&t.video_id) {
+                format!("{} · OFFLINE", self.player.audio.badge(self.cfg.audio_quality))
+            } else {
+                self.player.audio.badge(self.cfg.audio_quality)
+            };
+            PresenceTrack {
+                video_id: t.video_id.clone(),
+                title: t.title.clone(),
+                artists: t.artists.clone(),
+                album: t.album.clone(),
+                art_url: t.art_url(),
+                quality_badge,
+                position: self.player.time,
+                duration: if self.player.duration > 0.0 {
+                    self.player.duration
+                } else {
+                    t.duration.unwrap_or(0.0)
+                },
+                paused: self.player.paused || self.player.idle,
+            }
+        });
+        let changed = force
+            || match (&self.last_discord, &next) {
+                (Some(Some(prev)), Some(cur)) => {
+                    prev.video_id != cur.video_id
+                        || prev.paused != cur.paused
+                        || prev.quality_badge != cur.quality_badge
+                        || (prev.duration - cur.duration).abs() > 2.0
+                        || (prev.position - cur.position).abs() > 3.0
+                }
+                (Some(None), None) => false,
+                _ => true,
+            };
+        if changed {
+            self.last_discord = Some(next.clone());
+            let _ = self.tx.discord.send(PresenceCmd::Update(next));
         }
     }
 
@@ -3050,6 +4360,22 @@ impl App {
                 let item = items[cur];
                 match (k.code, action) {
                     // Settings toggle in place (menu stays open, like btop's options).
+                    (KeyCode::Left | KeyCode::Right, _) if item == MenuItem::Equalizer => {
+                        self.cfg.eq.cycle_preset(k.code == KeyCode::Right);
+                        self.apply_eq();
+                    }
+                    (KeyCode::Left | KeyCode::Right, _) if item == MenuItem::SleepTimer => {
+                        let (msg, restore) = self.sleep.cycle_quick(k.code == KeyCode::Right, Instant::now());
+                        if let Some(vol) = restore {
+                            self.player.volume = vol;
+                            self.player(PlayerCmd::SetVolume(vol));
+                        }
+                        self.player(PlayerCmd::SetLoopFile(
+                            self.queue.repeat == Repeat::One && !self.sleep.is_end_of_track(),
+                        ));
+                        self.sync_next();
+                        self.flash(msg, false);
+                    }
                     (KeyCode::Enter | KeyCode::Left | KeyCode::Right, _) if item.is_setting() => {
                         self.activate_menu(item, k.code != KeyCode::Left);
                     }
@@ -3062,6 +4388,138 @@ impl App {
                     (_, Some(Action::Up)) => state.select(Some((cur + len - 1) % len)),
                     (_, Some(Action::Top)) => state.select(Some(0)),
                     (_, Some(Action::Bottom)) => state.select(Some(len - 1)),
+                    (_, Some(Action::Quit)) => self.quit = true,
+                    _ => {}
+                }
+            }
+            Overlay::SleepTimer { state, custom } => {
+                if let Some(text) = custom {
+                    match k.code {
+                        KeyCode::Esc => *custom = None,
+                        KeyCode::Backspace => {
+                            text.pop();
+                        }
+                        KeyCode::Enter => {
+                            let val = text.trim().to_string();
+                            if let Ok(mins) = val.parse::<u64>()
+                                && mins > 0
+                            {
+                                self.overlay = None;
+                                self.set_sleep_minutes(mins);
+                            } else {
+                                self.flash("Enter a whole number of minutes (1–720)", true);
+                            }
+                        }
+                        KeyCode::Char(c) if c.is_ascii_digit() && text.len() < 4 => text.push(c),
+                        _ => {}
+                    }
+                    return;
+                }
+                let presets = SleepPreset::MENU_ITEMS;
+                let len = presets.len();
+                let cur = state.selected().unwrap_or(0).min(len - 1);
+                match (k.code, action) {
+                    (KeyCode::Esc, _) | (_, Some(Action::SleepTimer)) => self.overlay = None,
+                    (_, Some(Action::Down)) => state.select(Some((cur + 1) % len)),
+                    (_, Some(Action::Up)) => state.select(Some((cur + len - 1) % len)),
+                    (_, Some(Action::Top)) => state.select(Some(0)),
+                    (_, Some(Action::Bottom)) => state.select(Some(len - 1)),
+                    (KeyCode::Char('+') | KeyCode::Char('='), _) => {
+                        self.adjust_sleep_minutes(5);
+                    }
+                    (KeyCode::Char('-'), _) => {
+                        self.adjust_sleep_minutes(-5);
+                    }
+                    (KeyCode::Enter, _) => {
+                        let chosen = presets[cur];
+                        self.apply_sleep_preset(chosen);
+                    }
+                    (_, Some(Action::Quit)) => self.quit = true,
+                    _ => {}
+                }
+            }
+            Overlay::Equalizer { band } => {
+                let mut cur_band = *band;
+                match (k.code, action) {
+                    (KeyCode::Esc, _) | (_, Some(Action::Equalizer)) => self.overlay = None,
+                    (KeyCode::Left, _) | (KeyCode::Char('h'), _) => {
+                        cur_band = (cur_band + 9) % 10;
+                        *band = cur_band;
+                    }
+                    (KeyCode::Right, _) | (KeyCode::Char('l'), _) => {
+                        cur_band = (cur_band + 1) % 10;
+                        *band = cur_band;
+                    }
+                    (KeyCode::Up, _) | (KeyCode::Char('k'), _) | (KeyCode::Char('+'), _) => {
+                        self.cfg.eq.adjust_band(cur_band, 1.0);
+                        self.apply_eq();
+                    }
+                    (KeyCode::Down, _) | (KeyCode::Char('j'), _) | (KeyCode::Char('-'), _) => {
+                        self.cfg.eq.adjust_band(cur_band, -1.0);
+                        self.apply_eq();
+                    }
+                    (KeyCode::Char(' '), _) => {
+                        self.cfg.eq.enabled = !self.cfg.eq.enabled;
+                        self.apply_eq();
+                    }
+                    (KeyCode::Char('p') | KeyCode::Char(']') | KeyCode::Tab, _) => {
+                        self.cfg.eq.cycle_preset(true);
+                        self.apply_eq();
+                    }
+                    (KeyCode::Char('P') | KeyCode::Char('[') | KeyCode::BackTab, _) => {
+                        self.cfg.eq.cycle_preset(false);
+                        self.apply_eq();
+                    }
+                    (KeyCode::Char('0') | KeyCode::Char('r'), _) => {
+                        self.cfg.eq.reset_flat();
+                        self.apply_eq();
+                    }
+                    (_, Some(Action::Quit)) => self.quit = true,
+                    _ => {}
+                }
+            }
+            Overlay::Interlink { actions, state, .. } => {
+                let len = actions.len();
+                let cur = state.selected().unwrap_or(0).min(len.saturating_sub(1));
+                match (k.code, action) {
+                    (KeyCode::Esc, _) | (_, Some(Action::Interlink)) => self.overlay = None,
+                    (_, Some(Action::Down)) if len > 0 => state.select(Some((cur + 1) % len)),
+                    (_, Some(Action::Up)) if len > 0 => state.select(Some((cur + len - 1) % len)),
+                    (_, Some(Action::Top)) if len > 0 => state.select(Some(0)),
+                    (_, Some(Action::Bottom)) if len > 0 => state.select(Some(len - 1)),
+                    (KeyCode::Enter, _) => {
+                        if let Some(chosen) = actions.get(cur).cloned() {
+                            self.overlay = None;
+                            self.execute_interlink(chosen);
+                        }
+                    }
+                    (_, Some(Action::Quit)) => self.quit = true,
+                    _ => {}
+                }
+            }
+            Overlay::Stats { tab, state } => {
+                let cur_tab = *tab;
+                let len = stats_row_count(&self.stats, cur_tab);
+                let cur = state.selected().unwrap_or(0).min(len.saturating_sub(1));
+                match (k.code, action) {
+                    (KeyCode::Esc, _) | (_, Some(Action::Stats)) => self.overlay = None,
+                    (KeyCode::Right | KeyCode::Tab | KeyCode::Char(']'), _) => {
+                        let next = cur_tab.next();
+                        let next_len = stats_row_count(&self.stats, next);
+                        *tab = next;
+                        state.select((next_len > 0).then_some(0));
+                    }
+                    (KeyCode::Left | KeyCode::BackTab | KeyCode::Char('['), _) => {
+                        let prev = cur_tab.prev();
+                        let prev_len = stats_row_count(&self.stats, prev);
+                        *tab = prev;
+                        state.select((prev_len > 0).then_some(0));
+                    }
+                    (_, Some(Action::Down)) if len > 0 => state.select(Some((cur + 1) % len)),
+                    (_, Some(Action::Up)) if len > 0 => state.select(Some((cur + len - 1) % len)),
+                    (_, Some(Action::Top)) if len > 0 => state.select(Some(0)),
+                    (_, Some(Action::Bottom)) if len > 0 => state.select(Some(len - 1)),
+                    (KeyCode::Enter, _) if len > 0 => self.activate_stats_row(cur_tab, cur),
                     (_, Some(Action::Quit)) => self.quit = true,
                     _ => {}
                 }
@@ -3125,7 +4583,34 @@ impl App {
                         state.select(Some(next));
                     }
                 }
-                Overlay::Confirm { .. } | Overlay::AddToPlaylist { .. } => {}
+                Overlay::SleepTimer { state, custom } if custom.is_none() => {
+                    let len = SleepPreset::MENU_ITEMS.len();
+                    let cur = state.selected().unwrap_or(0).min(len - 1);
+                    let next = if down { (cur + 1) % len } else { (cur + len - 1) % len };
+                    state.select(Some(next));
+                }
+                Overlay::Interlink { actions, state, .. } => {
+                    let len = actions.len();
+                    if len > 0 {
+                        let cur = state.selected().unwrap_or(0).min(len - 1);
+                        let next = if down { (cur + 1) % len } else { (cur + len - 1) % len };
+                        state.select(Some(next));
+                    }
+                }
+                Overlay::Equalizer { band } => {
+                    let b = *band;
+                    self.cfg.eq.adjust_band(b, if down { -1.0 } else { 1.0 });
+                    self.apply_eq();
+                }
+                Overlay::Stats { tab, state } => {
+                    let len = stats_row_count(&self.stats, *tab);
+                    if len > 0 {
+                        let cur = state.selected().unwrap_or(0).min(len - 1);
+                        let next = if down { (cur + 1) % len } else { (cur + len - 1) % len };
+                        state.select(Some(next));
+                    }
+                }
+                Overlay::Confirm { .. } | Overlay::AddToPlaylist { .. } | Overlay::SleepTimer { .. } => {}
             }
             return;
         }
@@ -3246,6 +4731,64 @@ impl App {
                     }
                     return;
                 }
+                Some(Hit::SleepItem(i)) => {
+                    if let Some(&preset) = SleepPreset::MENU_ITEMS.get(i) {
+                        self.apply_sleep_preset(preset);
+                    }
+                    return;
+                }
+                Some(Hit::InterlinkItem(i)) => {
+                    let chosen = match self.overlay.as_ref() {
+                        Some(Overlay::Interlink { actions, .. }) => actions.get(i).cloned(),
+                        _ => None,
+                    };
+                    if let Some(act) = chosen {
+                        self.overlay = None;
+                        self.execute_interlink(act);
+                    }
+                    return;
+                }
+                Some(Hit::EqBand(b)) => {
+                    if let Some(Overlay::Equalizer { band }) = self.overlay.as_mut() {
+                        *band = b.min(9);
+                    }
+                    return;
+                }
+                Some(Hit::EqToggle) => {
+                    self.cfg.eq.enabled = !self.cfg.eq.enabled;
+                    self.apply_eq();
+                    return;
+                }
+                Some(Hit::EqPrevPreset) => {
+                    self.cfg.eq.cycle_preset(false);
+                    self.apply_eq();
+                    return;
+                }
+                Some(Hit::EqNextPreset) => {
+                    self.cfg.eq.cycle_preset(true);
+                    self.apply_eq();
+                    return;
+                }
+                Some(Hit::EqReset) => {
+                    self.cfg.eq.reset_flat();
+                    self.apply_eq();
+                    return;
+                }
+                Some(Hit::StatsTab(next)) => {
+                    let next_len = self.stats_row_count(next);
+                    if let Some(Overlay::Stats { tab, state }) = self.overlay.as_mut() {
+                        *tab = next;
+                        state.select((next_len > 0).then_some(0));
+                    }
+                    return;
+                }
+                Some(Hit::StatsItem(i)) => {
+                    if let Some(Overlay::Stats { tab, .. }) = self.overlay.as_ref() {
+                        let cur_tab = *tab;
+                        self.activate_stats_row(cur_tab, i);
+                    }
+                    return;
+                }
                 _ => {
                     if let Some(Overlay::Themes { original, .. }) = self.overlay.take() {
                         self.theme = original;
@@ -3271,6 +4814,7 @@ impl App {
                 }
                 Hit::Volume => {
                     if rect.width > 1 {
+                        self.crossfade_active = false;
                         let frac = ((x - rect.x) as f64 / (rect.width - 1) as f64).clamp(0.0, 1.0);
                         self.player.volume = (frac * 100.0).round();
                         self.player(PlayerCmd::SetVolume(self.player.volume));
@@ -3291,11 +4835,51 @@ impl App {
                     }
                 }
                 Hit::SwitchAccount => self.open_accounts(),
-                Hit::MenuItem(_) | Hit::ThemeItem(_) | Hit::AccountItem(_) | Hit::PlaylistPick(_) | Hit::Confirm(_) => {
+                Hit::SleepTimer => self.open_sleep_timer(),
+                Hit::AudioQuality => self.open_interlink(),
+                Hit::NowPlayingArtist => {
+                    if let Some(t) = self.current().cloned()
+                        && !t.artists.trim().is_empty()
+                    {
+                        self.go_to_artist(t.artists, t.artist_id);
+                    }
                 }
+                Hit::NowPlayingAlbum => {
+                    if let Some(t) = self.current().cloned()
+                        && let Some(album) = t.album
+                    {
+                        self.go_to_album(album, t.album_id, t.artists);
+                    }
+                }
+                Hit::LyricLine(idx) => {
+                    if let LyricsState::Found {
+                        lyrics: Lyrics::Synced(lines),
+                        ..
+                    } = &self.lyrics
+                        && let Some((ts, _)) = lines.get(idx)
+                    {
+                        self.player(PlayerCmd::SeekAbsolute(*ts));
+                        self.lyrics_sel = None;
+                        self.lyrics_scroll = None;
+                    }
+                }
+                Hit::MenuItem(_)
+                | Hit::ThemeItem(_)
+                | Hit::AccountItem(_)
+                | Hit::PlaylistPick(_)
+                | Hit::Confirm(_)
+                | Hit::SleepItem(_)
+                | Hit::InterlinkItem(_)
+                | Hit::EqBand(_)
+                | Hit::EqToggle
+                | Hit::EqPrevPreset
+                | Hit::EqNextPreset
+                | Hit::EqReset
+                | Hit::StatsTab(_)
+                | Hit::StatsItem(_) => {}
                 Hit::LibSection(s) => {
                     self.library.section = s;
-                    if self.logged_in {
+                    if self.logged_in || s == LibSection::Offline {
                         self.switch_library(s);
                     }
                 }
@@ -3422,6 +5006,8 @@ mod search_tests {
                 art: a,
                 resolve: unbounded_channel().0,
                 notify: unbounded_channel().0,
+                discord: unbounded_channel().0,
+                offline: unbounded_channel().0,
             },
             None,
             None,
@@ -3503,6 +5089,7 @@ mod search_tests {
             video_id: id.into(),
             title: id.into(),
             artists: String::new(),
+            artist_id: None,
             album: None,
             album_id: None,
             duration: None,
@@ -3558,6 +5145,68 @@ mod search_tests {
         app.on_ytm(YtmEvent::Disliked { video_id: "a".into() });
         assert!(!is_liked(&app.likes, &track("a")), "a dislike replaces the like");
         assert_eq!(app.queue.get(0).unwrap().liked, Some(false));
+    }
+
+    #[test]
+    fn clearing_the_queue_fetches_a_fresh_radio_near_the_end() {
+        let (mut app, mut rx) = signed_in(&[]);
+        app.queue.replace(vec![track("a")], 0);
+        app.play_index(0); // last song starts: autoplay asks for a radio of "a"
+        assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|r| matches!(r, YtmReq::Radio { .. })));
+        app.on_ytm(YtmEvent::Radio {
+            seed: "a".into(),
+            tracks: vec![track("b"), track("c")],
+        });
+        assert_eq!(app.queue.len(), 3);
+
+        app.dispatch(Action::ClearQueue);
+        assert_eq!(app.queue.len(), 1, "only the playing song stays");
+        assert!(
+            app.flash
+                .as_ref()
+                .is_some_and(|f| f.text == "Queue cleared (autoplay on)")
+        );
+        // Mid-song: nothing yet, the cleared songs don't come straight back.
+        app.on_player(PlayerEvent::Duration(200.0));
+        app.on_player(PlayerEvent::TimePos(60.0));
+        assert!(rx.try_recv().is_err());
+        // Near the end: a fresh radio is fetched (this used to never happen).
+        app.on_player(PlayerEvent::TimePos(180.0));
+        assert!(matches!(rx.try_recv(), Ok(YtmReq::Radio { seed }) if seed == "a"));
+        app.on_ytm(YtmEvent::Radio {
+            seed: "a".into(),
+            tracks: vec![track("d"), track("e")],
+        });
+        assert_eq!(
+            app.queue.get(1).unwrap().video_id,
+            "d",
+            "fresh songs follow the current one"
+        );
+        assert_eq!(app.queue.current, Some(0), "the playing song isn't interrupted");
+    }
+
+    #[test]
+    fn r_on_the_playing_song_replaces_only_whats_next() {
+        let (mut app, mut rx) = signed_in(&[]);
+        app.queue
+            .replace(vec![track("p"), track("a"), track("b"), track("c")], 1);
+        app.play_index(1);
+        while rx.try_recv().is_ok() {}
+        app.set_tab(Tab::Queue);
+        app.queue_state.select(None);
+        app.dispatch(Action::Radio);
+        assert!(matches!(rx.try_recv(), Ok(YtmReq::Radio { seed }) if seed == "a"));
+        app.on_ytm(YtmEvent::Radio {
+            seed: "a".into(),
+            tracks: vec![track("a"), track("x"), track("y")],
+        });
+        let ids: Vec<&str> = app.queue.entries.iter().map(|e| e.track.video_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["p", "a", "x", "y"],
+            "b and c replaced; a keeps playing and p stays as history"
+        );
+        assert_eq!(app.queue.current, Some(1));
     }
 
     #[test]
@@ -3666,6 +5315,8 @@ mod resolve_tests {
             art: unbounded_channel().0,
             resolve: r,
             notify: unbounded_channel().0,
+            discord: unbounded_channel().0,
+            offline: unbounded_channel().0,
         };
         let app = App::new(Config::default(), paths, State::default(), keymap, channels, None, None);
         Harness {
@@ -3680,6 +5331,7 @@ mod resolve_tests {
             video_id: id.into(),
             title: id.into(),
             artists: String::new(),
+            artist_id: None,
             album: None,
             album_id: None,
             duration: None,
@@ -3871,6 +5523,8 @@ mod resolve_tests {
             art: unbounded_channel().0,
             resolve: unbounded_channel().0,
             notify: n,
+            discord: unbounded_channel().0,
+            offline: unbounded_channel().0,
         };
         let cfg = Config {
             notifications: true,
@@ -4190,6 +5844,8 @@ mod playlist_tests {
             art: unbounded_channel().0,
             resolve: unbounded_channel().0,
             notify: unbounded_channel().0,
+            discord: unbounded_channel().0,
+            offline: unbounded_channel().0,
         };
         let cfg = Config {
             resume: false,
@@ -4204,6 +5860,7 @@ mod playlist_tests {
             video_id: id.into(),
             title: format!("Song {id}"),
             artists: "Band".into(),
+            artist_id: None,
             album: None,
             album_id: None,
             duration: Some(200.0),
@@ -4621,5 +6278,322 @@ mod playlist_tests {
         key(&mut app, KeyCode::Char('D'));
         assert!(app.overlay.is_none());
         assert!(deletes(&mut rx).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod pro_features_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+
+    struct Rig {
+        app: App,
+        player: UnboundedReceiver<PlayerCmd>,
+        ytm: UnboundedReceiver<YtmReq>,
+    }
+
+    fn rig() -> Rig {
+        let (p, prx) = unbounded_channel();
+        let (y, yrx) = unbounded_channel();
+        let paths = test_paths();
+        let (keymap, _) = Keymap::new(&Default::default());
+        let channels = Channels {
+            player: p,
+            ytm: y,
+            lyrics: unbounded_channel().0,
+            art: unbounded_channel().0,
+            resolve: unbounded_channel().0,
+            notify: unbounded_channel().0,
+            discord: unbounded_channel().0,
+            offline: unbounded_channel().0,
+        };
+        let cfg = Config {
+            resume: false,
+            ..Config::default()
+        };
+        let app = App::new(cfg, paths, State::default(), keymap, channels, None, None);
+        Rig {
+            app,
+            player: prx,
+            ytm: yrx,
+        }
+    }
+
+    fn track(id: &str) -> Track {
+        Track {
+            video_id: id.into(),
+            title: format!("Track {id}"),
+            artists: "Seether".into(),
+            artist_id: Some("UCseether".into()),
+            album: Some("Disclaimer".into()),
+            album_id: Some("MPREb_disc".into()),
+            duration: Some(200.0),
+            thumbnail: None,
+            liked: None,
+        }
+    }
+
+    fn key(app: &mut App, code: KeyCode) {
+        app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn drain<T>(rx: &mut UnboundedReceiver<T>) -> Vec<T> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    fn screen(app: &mut App) -> String {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 36)).unwrap();
+        term.draw(|f| {
+            crate::ui::draw(f, app);
+        })
+        .unwrap();
+        term.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn sleep_timer_end_of_track_stops_without_advancing_and_cli_works() {
+        let mut r = rig();
+        r.app.queue.replace(vec![track("a"), track("b")], 0);
+        r.app.play_index(0);
+        r.app.player.idle = false;
+        r.app.load_started = None;
+        drain(&mut r.player);
+
+        // Open Sleep Timer overlay with 'z' and select "End of current track" (row 0).
+        key(&mut r.app, KeyCode::Char('z'));
+        assert!(matches!(r.app.overlay, Some(Overlay::SleepTimer { .. })));
+        let shown = screen(&mut r.app);
+        assert!(shown.contains("sleep timer") && shown.contains("End of current track"));
+        if let Some(Overlay::SleepTimer { state, .. }) = r.app.overlay.as_mut() {
+            state.select(Some(0));
+        }
+        key(&mut r.app, KeyCode::Enter);
+        assert!(r.app.sleep.is_end_of_track());
+        assert_eq!(r.app.status_line("{sleep}"), "end of track");
+        // mpv must clear preloaded next track so gapless playback doesn't advance.
+        assert!(
+            drain(&mut r.player)
+                .iter()
+                .any(|c| matches!(c, PlayerCmd::SetNext(None)))
+        );
+
+        // When mpv goes idle at track EOF, pova stops cleanly on track 0 instead of advancing to track 1.
+        r.app.on_player(PlayerEvent::Idle(true));
+        assert_eq!(r.app.queue.current, Some(0));
+        assert!(r.app.player.paused);
+        assert!(!r.app.sleep.is_active());
+
+        // Remote CLI: set 15 min, adjust +5, status, off.
+        assert!(r.app.on_control(crate::control::Command::Sleep("15".into())).starts_with("ok"));
+        assert!(r.app.sleep.is_active());
+        assert!(r.app.on_control(crate::control::Command::Sleep("+5".into())).starts_with("ok"));
+        assert!(r.app.on_control(crate::control::Command::Sleep("off".into())).starts_with("ok"));
+        assert!(!r.app.sleep.is_active());
+    }
+
+    #[test]
+    fn equalizer_overlay_updates_mpv_filter_and_persists() {
+        let mut r = rig();
+        key(&mut r.app, KeyCode::Char('e'));
+        assert!(matches!(r.app.overlay, Some(Overlay::Equalizer { band: 0 })));
+        let shown = screen(&mut r.app);
+        assert!(shown.contains("10-band equalizer") && shown.contains("Flat"));
+
+        // Press 'p' to cycle to Bass Boost -> sends labeled @povaeq filter to mpv.
+        key(&mut r.app, KeyCode::Char('p'));
+        assert_eq!(r.app.cfg.eq.preset, EqPreset::BassBoost);
+        assert!(r.app.cfg.eq.enabled);
+        let cmds = drain(&mut r.player);
+        assert!(cmds.iter().any(|c| matches!(c, PlayerCmd::SetEq(Some(f)) if f.starts_with("@povaeq:"))));
+        assert_eq!(State::load(&r.app.paths.state_file()).eq.unwrap().preset, EqPreset::BassBoost);
+
+        // Remote CLI `pova eq off` clears the filter.
+        assert_eq!(r.app.on_control(crate::control::Command::Eq("off".into())), "ok eq off");
+        assert!(drain(&mut r.player).iter().any(|c| matches!(c, PlayerCmd::SetEq(None))));
+    }
+
+    #[test]
+    fn interlink_overlay_and_external_spotify_url_work() {
+        let mut r = rig();
+        r.app.queue.replace(vec![track("vid1")], 0);
+        r.app.on_player(PlayerEvent::AudioCodec(Some("opus".into())));
+        r.app.on_player(PlayerEvent::SampleRate(Some(48000)));
+        r.app.on_player(PlayerEvent::AudioBitrate(Some(158_000)));
+        assert_eq!(r.app.status_line("{quality}"), "MAX · OPUS 48kHz · 158k");
+
+        // Open Interlink & Signal Path overlay with 'i'.
+        key(&mut r.app, KeyCode::Char('i'));
+        let shown = screen(&mut r.app);
+        assert!(shown.contains("interlink & signal path"), "{shown}");
+        assert!(shown.contains("OPUS"), "{shown}");
+        assert!(shown.contains("Go to Artist") && shown.contains("Go to Album"));
+        assert!(shown.contains("Copy Universal Link"));
+
+        // Enter on row 0 ("Go to Artist") opens View::Artist("UCseether") directly.
+        key(&mut r.app, KeyCode::Enter);
+        assert!(r.app.overlay.is_none());
+        assert_eq!(r.app.tab, Tab::Search);
+        assert!(
+            drain(&mut r.ytm)
+                .iter()
+                .any(|req| matches!(req, YtmReq::Load { view: View::Artist(id), .. } if id == "UCseether"))
+        );
+
+        // Remote `pova open` with a Spotify URL sends YtmReq::ResolveLink.
+        let reply = r.app.on_control(crate::control::Command::Open(
+            "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT".into(),
+        ));
+        assert!(reply.starts_with("ok"));
+        assert!(
+            drain(&mut r.ytm)
+                .iter()
+                .any(|req| matches!(req, YtmReq::ResolveLink { .. }))
+        );
+    }
+
+    #[test]
+    fn ab_loop_speed_quality_and_interactive_synced_lyrics_seek() {
+        let mut r = rig();
+        r.app.queue.replace(vec![track("a"), track("b"), track("b")], 0);
+        r.app.play_index(0);
+        r.app.player.time = 20.0;
+        r.app.player.duration = 200.0;
+        drain(&mut r.player);
+
+        // Set point A at 20s, point B at 40s, then passing 40s seeks back to 20s.
+        key(&mut r.app, KeyCode::Char('B'));
+        r.app.player.time = 40.0;
+        key(&mut r.app, KeyCode::Char('B'));
+        assert_eq!(r.app.ab_loop, AbLoop::Active { a: 20.0, b: 40.0 });
+        r.app.on_player(PlayerEvent::TimePos(40.5));
+        assert!(
+            drain(&mut r.player)
+                .iter()
+                .any(|c| matches!(c, PlayerCmd::SeekAbsolute(t) if (*t - 20.0).abs() < 0.01))
+        );
+
+        // Playback speed stepping via ')' and remote command.
+        key(&mut r.app, KeyCode::Char(')'));
+        assert_eq!(r.app.cfg.playback_speed, 1.15);
+        assert!(
+            drain(&mut r.player)
+                .iter()
+                .any(|c| matches!(c, PlayerCmd::SetSpeed(s) if (*s - 1.15).abs() < 0.01))
+        );
+
+        // Quality tier switching via remote command sends SetYtdlFormat.
+        assert_eq!(
+            r.app.on_control(crate::control::Command::Quality("low".into())),
+            "ok quality low (saver)"
+        );
+        assert!(
+            drain(&mut r.player)
+                .iter()
+                .any(|c| matches!(c, PlayerCmd::SetYtdlFormat(f) if f.contains("abr<=64")))
+        );
+
+        // Interactive synced lyrics: Down selects next line, Enter seeks straight to its timestamp.
+        r.app.tab = Tab::Lyrics;
+        r.app.player.time = 5.0;
+        r.app.lyrics = LyricsState::Found {
+            lyrics: Lyrics::Synced(vec![
+                (0.0, "Line 0".into()),
+                (10.0, "Line 1".into()),
+                (25.0, "Line 2".into()),
+            ]),
+            source: "LRCLIB",
+        };
+        key(&mut r.app, KeyCode::Down);
+        assert_eq!(r.app.lyrics_sel, Some(1));
+        key(&mut r.app, KeyCode::Down);
+        assert_eq!(r.app.lyrics_sel, Some(2));
+        key(&mut r.app, KeyCode::Enter);
+        assert!(
+            drain(&mut r.player)
+                .iter()
+                .any(|c| matches!(c, PlayerCmd::SeekAbsolute(t) if (*t - 25.0).abs() < 0.01))
+        );
+        assert_eq!(r.app.lyrics_sel, None);
+
+        // Queue deduplication drops the second upcoming copy of "b".
+        assert_eq!(r.app.queue.deduplicate_upcoming(), 1);
+        assert_eq!(r.app.queue.len(), 2);
+    }
+
+    #[test]
+    fn stats_discord_and_offline_cache_work_end_to_end() {
+        let (p, mut prx) = unbounded_channel();
+        let (d, mut drx) = unbounded_channel();
+        let (o, mut orx) = unbounded_channel();
+        let paths = test_paths();
+        let (keymap, _) = Keymap::new(&Default::default());
+        let channels = Channels {
+            player: p,
+            ytm: unbounded_channel().0,
+            lyrics: unbounded_channel().0,
+            art: unbounded_channel().0,
+            resolve: unbounded_channel().0,
+            notify: unbounded_channel().0,
+            discord: d,
+            offline: o,
+        };
+        let cfg = Config {
+            resume: false,
+            ..Config::default()
+        };
+        let mut app = App::new(cfg, paths, State::default(), keymap, channels, None, None);
+        app.queue.replace(vec![track("off1")], 0);
+        app.play_index(0);
+        app.player.idle = false;
+        app.player.paused = false;
+        app.player.duration = 200.0;
+        drain(&mut prx);
+
+        // Listen for 26s in 2s steps -> counts a play in Wrapped Mini stats.
+        for step in 1..=13 {
+            app.on_player(PlayerEvent::TimePos(step as f64 * 2.0));
+        }
+        assert_eq!(app.stats.total_plays, 1);
+        assert!(app.on_control(crate::control::Command::Stats).contains("1 plays"));
+
+        // Open Wrapped Mini overlay with 'W' and verify rendering.
+        key(&mut app, KeyCode::Char('W'));
+        let shown = screen(&mut app);
+        assert!(shown.contains("wrapped mini") && shown.contains("Track off1"), "{shown}");
+        key(&mut app, KeyCode::Esc);
+
+        // Toggle Discord Rich Presence via remote CLI.
+        assert_eq!(app.on_control(crate::control::Command::Discord("on".into())), "ok discord on");
+        let dcmds = drain(&mut drx);
+        assert!(dcmds.iter().any(|c| matches!(c, PresenceCmd::SetEnabled(true))));
+        assert!(dcmds.iter().any(|c| matches!(c, PresenceCmd::Update(Some(_)))));
+
+        // Save track offline with 'O', complete download, and verify Library -> Offline works signed out.
+        key(&mut app, KeyCode::Char('O'));
+        assert!(matches!(orx.try_recv(), Ok(OfflineReq { track, .. }) if track.video_id == "off1"));
+        let dir = app.paths.offline_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("off1.opus");
+        std::fs::write(&file_path, b"local audio").unwrap();
+        app.on_offline(OfflineEvent::Saved(crate::offline::OfflineEntry {
+            track: track("off1"),
+            file: "off1.opus".into(),
+            bytes: 11,
+            saved_at: 1_700_000_000,
+        }));
+        assert!(app.is_offline_cached("off1"));
+        // Playing the cached track now loads the local file path directly (0 ms offline!).
+        app.play_index(0);
+        assert!(
+            drain(&mut prx)
+                .iter()
+                .any(|c| matches!(c, PlayerCmd::Load { url, .. } if url.ends_with("off1.opus")))
+        );
+        // Switch Library to Offline while signed out: shows the saved track instead of sign-in screen.
+        app.tab = Tab::Library;
+        app.switch_library(LibSection::Offline);
+        let shown = screen(&mut app);
+        assert!(shown.contains("Track off1") && shown.contains("Offline"), "{shown}");
     }
 }

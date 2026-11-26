@@ -14,6 +14,18 @@ mpv_args = []              # extra flags for mpv, if you want them
 resume = true              # start where you left off: same queue, same spot, paused
 normalize_loudness = true  # play every song at the same loudness
 notifications = false      # desktop popup with the cover art when the song changes
+discord_rpc = false        # show "Listening to..." status on Discord (local IPC socket)
+discord_app_id = ""        # optional custom Discord application ID
+audio_quality = "max"      # max | high | normal | low (data saver)
+crossfade_secs = 0         # smooth fade-out / fade-in at track transitions (0..12 seconds)
+sleep_fade_secs = 10       # fade-out window (seconds) before a sleep timer pauses playback
+playback_speed = 1.0       # playback speed multiplier (0.5..2.0)
+pitch_correction = true    # keep original pitch when playback_speed != 1.0
+
+[eq]
+enabled = false
+preset = "flat"            # flat | bass_boost | vocal | rock | electronic | acoustic | pop | jazz | classical | treble_boost | late_night | custom
+gains = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 [viz]
 mode = "bars"              # bars | mirror | mono | wave

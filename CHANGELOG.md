@@ -1,5 +1,53 @@
 # Changelog
 
+## Unreleased — sleep timer, universal interlink, 10-band EQ & Tidal/Spotify audio features
+
+- **Upstream fixes from `v1.2.4` (#33):** clearing the queue (`C`) with
+  autoplay on now fetches fresh similar songs 25 s before the current song ends,
+  and pressing `r` on the playing song keeps it playing while replacing only
+  what comes next.
+- **Spotify-style sleep timer (`z` / `pova sleep`).** Countdown presets (`5m` to
+  `1h`), custom minutes, `+5m` / `-5m` adjustment, and `End of current track`
+  mode (prevents gapless advance, repeat-one, and autoplay from continuing past
+  the track). Includes a smooth cosine volume fade-out over the final 10 seconds
+  and restores your volume right after pausing. Live `☾` countdown shown in Now
+  Playing, the player border, Queue, and `{sleep}` in `pova status`.
+- **Universal Interlink (`i`, `y`, `pova open <url>`, clickable artist/album).**
+  Jump from any playing or selected track straight to its Artist, Album, Song
+  Radio, or Live Lyrics; copy universal cross-platform `song.link` URLs (for
+  Spotify, Tidal, Apple Music, and YouTube Music), YouTube Music links, or
+  timestamped links (`y` copies `song.link` in one keystroke); and paste or pass
+  YouTube, YouTube Music, Spotify, Tidal, or `song.link` URLs straight into the
+  Search bar, `pova --play <url>`, or `pova open <url>` to resolve and play
+  directly in pova.
+- **Tidal-style Audio Quality tiers & live Signal Path.** Switch between `MAX`,
+  `HIGH`, `NORMAL`, and `LOW` (Data Saver) stream quality, inspect live codec,
+  sample rate, channel count, and bitrate directly in Now Playing and the
+  Signal Path card inside `i`, and display `{quality}` in `pova status`.
+- **Spotify-style 10-Band Graphic Equalizer (`e` / `pova eq`).** Interactive
+  vertical 10-band ISO equalizer (`32 Hz` to `16 kHz`, ±12 dB) with 11 built-in
+  presets (`Flat`, `Bass Boost`, `Vocal`, `Rock`, `Electronic`, `Acoustic`,
+  `Pop`, `Jazz`, `Classical`, `Treble Boost`, `Late Night`) plus `Custom`,
+  applied live over mpv's audio filter chain with zero extra dependencies.
+- **Smooth track crossfade, playback speed & pitch lock, A-B section loop,
+  interactive synced lyrics & queue tools.** Configurable track transition fade
+  (`0–12 s`), playback speed (`0.5x–2.0x` via `(` / `)` or `pova speed`) with
+  optional pitch lock, A-B section loop (`B` / `pova ab-loop`) with progress
+  bar markers, click-or-Enter synced lyric seeking in the Lyrics tab, remaining
+  queue duration header, and queue deduplication in the Esc menu.
+- **Listening Stats / Wrapped Mini (`W` / `pova stats`).** 100% local listening
+  history (`stats.json`) with total plays, listening hours, daily streak,
+  btop-style Top Tracks & Top Artists charts, and Recent plays (click or press
+  `Enter` to play a track or jump to an artist).
+- **Native Discord Rich Presence (`Esc` menu / `pova discord`).** Pure local
+  Unix socket IPC (`discord-ipc-0..9`, Flatpak & Snap aware, zero extra crates)
+  showing Spotify-style "Listening to..." status with live album art, progress
+  timestamps, quality tier, and a clickable `song.link` button.
+- **Offline Audio Cache & Offline Library (`O` / `Library → Offline` / `pova offline`).**
+  Save any track locally for instant 0 ms playback with zero internet required,
+  with `⬇ offline` badges, Signal Path source readout, and a dedicated Offline
+  section in Library that works even when signed out.
+
 ## 1.3.0 — browser sign-in, Brand Accounts, smoother UI & multi-arch packages
 
 - **One-click browser profile sign-in and `pova login` / `pova logout`.** The
